@@ -42,6 +42,8 @@ export interface HostChannelRowProjection {
   readonly kind: string
   readonly text: string
   readonly label?: string
+  /** `label: 'team-message'`: the sending team member's name. */
+  readonly sender?: string
   readonly streaming?: boolean
   readonly time?: number
   readonly seq?: number

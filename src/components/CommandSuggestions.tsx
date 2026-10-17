@@ -130,7 +130,10 @@ export function CommandSuggestions({
             : stringWidth(rawDescription) > descriptionWidth
               ? truncateToWidth(rawDescription, descriptionWidth - 1) + '…'
               : rawDescription
-        const padAfter = Math.max(0, nameWidth - stringWidth(command.name))
+        // 名字比名字列还宽时（长 spec、长 bundle 名）差值为 0，描述会贴着名字
+        // 渲染成 `…ple.gitInstall from a git URL`——至少留一格分隔；超出的这一格
+        // 由行尾的 truncate 裁掉，行内容不会因此多出一行。
+        const padAfter = Math.max(1, nameWidth - stringWidth(command.name))
         // 灰区整行一个 `subtle`，且刻意不做查询命中提亮（灰区不该看起来像
         // 「可用」）。选中行仍走下方通用样式，保证光标始终可见。
         if (isHeld && !isSelected) {

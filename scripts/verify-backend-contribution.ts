@@ -196,7 +196,10 @@ check('dogfood: flipping `inTree` on a built-in reds on its host label key, and 
 // ── 4. The probe backend: resource invariants, install shapes, coverage ──────
 {
   registerBackend({ manifest: probeManifest, load: probeLoad })
-  registerBackend({ manifest: manifestWithoutInstall, load: probeLoad })
+  registerBackend({ manifest: manifestWithoutInstall, load: async () => {
+    const module = await import('./fixtures/probe-backend/index.js')
+    return { ...module, probeBackend: module.createProbeBackend({ id: manifestWithoutInstall.id }) }
+  } })
 
   check('probe: registering without loading neither imports the module nor opens its pool',
     probePoolState().opens === 0, probePoolState())

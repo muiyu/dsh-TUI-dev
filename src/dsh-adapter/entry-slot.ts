@@ -11,6 +11,8 @@
 export interface EntrySlot {
   /** The DSH kernel: the screen waits for the row's `attachDsh`. */
   readonly dsh: boolean
+  /** The host's DSH runtime version: this package's own resolution may name another copy. */
+  readonly kernelVersion?: string
   /** Set by the row as soon as it applies, so the entry can tell whether a
    *  `dsh-tui` row exists once the composition settled. */
   rowSeen: boolean
@@ -34,8 +36,8 @@ const ENTRY_SLOT_KEY = Symbol.for('@deepseek-harness-tui/dsh-tui:host-entry')
 type SlotHost = typeof globalThis & { [ENTRY_SLOT_KEY]?: EntrySlot }
 
 /** The entry's slot, published for the `dsh-tui` row on the DSH kernel. */
-export function createEntrySlot(dsh: boolean): EntrySlot {
-  const slot: EntrySlot = { dsh, rowSeen: false }
+export function createEntrySlot(dsh: boolean, kernelVersion?: string): EntrySlot {
+  const slot: EntrySlot = { dsh, rowSeen: false, kernelVersion }
   if (dsh) (globalThis as SlotHost)[ENTRY_SLOT_KEY] = slot
   return slot
 }

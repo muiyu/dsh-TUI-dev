@@ -7,6 +7,15 @@ import type { SubagentTranscriptPage, SubagentTranscriptWindow } from '../../age
 import type { AgentIdentity, AgentMessageControl, AgentMessageSubmitInput, AgentMessageSubmitResult, AgentMessageView } from '../../adapter/ports/channel-view.js'
 import type { ChannelState, ChatRow, SubagentControl, SubagentRow } from './types.js'
 import { isSubagentToolName } from './projection-helpers.js'
+import { teamMailboxAsRelay } from '../compat/agent-team-0.2.0.js'
+import { teamMessageOf } from '../team-tools.js'
+
+/** A relay's body as the agent-message feed shows it: a team message without
+ *  its `Team message from <name>:` framing block (the sender is `from`). */
+function relayTextOf(source: unknown, content: unknown): string {
+  const team = Array.isArray(content) ? teamMessageOf(source, content as readonly { readonly type: string }[]) : undefined
+  return team?.text ?? agentMessageTextOf(content)
+}
 
 /**
  * Bound the retained description text. Evicting an older term does not cancel
@@ -299,16 +308,18 @@ function createSessionSubagentProjection(
    *  provable from the log alone; a plain user/message (no relay source)
    *  never becomes one. */
   const noteChildRelay = (childId: string, event: unknown): void => {
-    const data = (event as { readonly data?: { readonly id?: unknown; readonly source?: unknown; readonly content?: unknown } }).data
-    if (data === undefined || typeof data.id !== 'string' || data.id === '') return
+    const raw = (event as { readonly data?: { readonly id?: unknown; readonly source?: unknown; readonly content?: unknown } }).data
+    if (raw === undefined || typeof raw.id !== 'string' || raw.id === '') return
+    // compat(dsh 0.2.0, log): a 0.2.0 mailbox delivery reads as the relay it became.
+    const data = teamMailboxAsRelay(raw)
     const relay = agentRelaySourceOf(data.source)
     if (relay === undefined) return
     foldAgentMessage(agentMessages, {
-      messageId: data.id,
+      messageId: raw.id,
       from: relay.senderSessionId,
       to: childId,
       via: 'agent-relay',
-      text: agentMessageTextOf(data.content),
+      text: relayTextOf(data.source, data.content),
       state: 'queued',
       ...(typeof (event as { seq?: unknown }).seq === 'number' ? { sourceRef: `seq:${(event as { seq: number }).seq}` } : {}),
       observedAt: eventTime(event) ?? Date.now(),
@@ -420,14 +431,16 @@ function createSessionSubagentProjection(
       // names the sending session. Plain user text, injected context and
       // settlement notices are not relays; they stay invisible here, just as
       // the translator keeps them out of bubbles.
-      const relay = agentRelaySourceOf(data.source)
+      // compat(dsh 0.2.0, log): a 0.2.0 mailbox delivery reads as the relay it became.
+      const delivered = teamMailboxAsRelay(data)
+      const relay = agentRelaySourceOf(delivered.source)
       if (relay !== undefined && typeof data.id === 'string' && data.id !== '') {
         foldAgentMessage(agentMessages, {
           messageId: data.id,
           from: relay.senderSessionId,
           ...(parentSessionId === undefined ? {} : { to: parentSessionId, parentSessionId }),
           via: 'agent-relay',
-          text: agentMessageTextOf(data.content),
+          text: relayTextOf(delivered.source, delivered.content),
           state: 'queued',
           ...(typeof ev.seq === 'number' ? { sourceRef: `seq:${ev.seq}` } : {}),
           observedAt: eventTime(event) ?? Date.now(),

@@ -387,6 +387,21 @@ that starts `dsh`. Check `DEEPSEEK_BASE_URL` too for a custom endpoint. For
 `deepseek-account` or a subscription model, inspect `/auth status` and sign in again with
 `/auth login <provider>` if needed.
 
+### The browser connects but dsh-tui cannot reach a self-hosted HTTPS endpoint (self-signed cert / private CA)
+
+Self-hosted LLM token servers on a private network are often fronted with HTTPS certificates issued by Caddy, mkcert, Step CA, or similar, whose root certificate is not in Node.js's built-in Mozilla CA bundle. The browser and system `curl` then work fine, but after switching dsh-tui to that provider the TLS handshake fails with `self-signed certificate in certificate chain` or `UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
+
+The reason is that dsh-tui's HTTP requests run on Node.js's TLS layer, and Node.js trusts only two things: the Mozilla CA bundle compiled into it, plus the PEM file named by the `NODE_EXTRA_CA_CERTS` environment variable (merged with the built-in list). macOS Keychain "trust" settings have no effect on a Node.js process — Node does not call the system Security.framework, so the trust chain the browser and `curl` use is irrelevant here.
+
+Export the root certificate as PEM and set the variable before launching dsh-tui:
+
+```sh
+export NODE_EXTRA_CA_CERTS=/path/to/your-ca-root.pem
+dsh-tui
+```
+
+Note that `NODE_EXTRA_CA_CERTS` is a bootstrap-protected variable for the DSH launcher: no `.env` file may set it (neither the project directory's `.env` nor `~/.dsh/.env`), and putting it there makes startup fail with an error telling you to `export` it instead — it can only come from the shell environment that launches dsh. The same protected group covers other certificate / TLS variables such as `SSL_CERT_FILE`, `SSL_CERT_DIR`, and `NODE_TLS_REJECT_UNAUTHORIZED`.
+
 ### The activity row appears twice
 
 Check whether `dsh-working-activity` was added separately to the profile. Keep

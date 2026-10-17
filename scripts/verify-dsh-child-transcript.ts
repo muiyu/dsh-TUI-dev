@@ -221,6 +221,22 @@ const rosterService = (ids: readonly string[]) => ({
     JSON.stringify({ raw: leaves.map(l => l.key), uniqued: uniqued.map(l => l.key) }))
 }
 
+// An Agent Teams teammate's received messages stay out of the lane: the agent-message feed places them on this child's pages
+// (docs/agent-teams-design.md), so a leaf of their own would show them twice.
+{
+  const log = new Log()
+  log.add('user/message', { id: 'tm-2', role: 'user', source: { kind: 'agent-message', form: 'relay', senderSessionId: PARENT }, content: [text('Team message from lead:'), text('and docs/')] })
+  log.assistant('am-1', [text('on it')])
+  const memory = createMemoryPersistence()
+  memory.sessions.set(CHILD, { header: { version: 4, id: CHILD, createdAt: 1, isSeeded: false }, events: log.events, inheritedEventCount: 0 })
+  const { deps } = makeDeps({ subagents: () => rosterService([CHILD]), persistence: () => memory.source })
+  const page = await readChildTranscriptPage(deps, CHILD)
+  assert.ok(page !== null)
+  check('T11 team messages are left to the agent-message feed',
+    page.events.map(e => e.type).join(',') === 'assistant.message',
+    page.events.map(e => e.type))
+}
+
 // ── Section O: ownership and fail-closed validation ────────────────────────
 {
   const log = new Log()

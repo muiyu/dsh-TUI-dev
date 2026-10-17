@@ -29,6 +29,7 @@ import {
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { snapshotLiveSessionEvents } from './compat/liveSession.js'
+import { getLang } from '../i18n.js'
 import {
   DEFAULT_PERMISSION_OPTIONS,
   type PermissionPanelDecision,
@@ -116,6 +117,26 @@ export function getApprovalStore(ctx: Parameters<typeof compositionRoot>[0]): Ap
 }
 
 const COMMAND_CLIP = 500
+
+/**
+ * The ask's reason in the UI language. Requests may carry a localized
+ * `displayReason: { en, zh }` next to the English audit `reason` (DSH's
+ * auto-review asks do); older request types lack the field, so it is read
+ * structurally.
+ * @param req - The pending approval request.
+ * @returns The localized reason, else `req.reason`.
+ */
+function reasonOf(req: ApprovalRequest): string | undefined {
+  const display = (req as { displayReason?: unknown }).displayReason
+  if (display !== null && typeof display === 'object') {
+    const byLang = display as Record<string, unknown>
+    for (const lang of [getLang(), 'en']) {
+      const text = byLang[lang]
+      if (typeof text === 'string' && text.trim() !== '') return text
+    }
+  }
+  return req.reason
+}
 
 /**
  * Recover the gated command from the session log: the approval request
@@ -210,6 +231,9 @@ export class ApprovalStore implements PermissionPanelSource {
    * have flipped — re-checks below this guard are skipped.
    */
   private externalCheckedAtEvents = -1
+  /** UI language the parked asks' reasons were resolved in (see
+   *  {@link refreshReasonLang}). */
+  private reasonLang = getLang()
   private notifyQueued = false
   /**
    * CallIds whose approval ask already settled (decided or cancelled).
@@ -249,6 +273,7 @@ export class ApprovalStore implements PermissionPanelSource {
    * @returns The cached snapshot; the reference is stable between mutations.
    */
   getSnapshot(): ApprovalSnapshot | null {
+    this.refreshReasonLang()
     this.refreshActiveExternal()
     return this.snapshotCache
   }
@@ -280,6 +305,7 @@ export class ApprovalStore implements PermissionPanelSource {
   pendingAgentDetail(
     agentId: string,
   ): Pick<ApprovalSnapshot, 'toolName'> & Partial<Pick<ApprovalSnapshot, 'reason' | 'command'>> | undefined {
+    this.refreshReasonLang()
     for (const ask of [...(this.active === undefined ? [] : [this.active]), ...this.queue]) {
       if (ask.snapshot.agentId !== agentId) continue
       const { toolName, reason, command } = ask.snapshot
@@ -301,6 +327,21 @@ export class ApprovalStore implements PermissionPanelSource {
       this.notifyQueued = false
       this.emit()
     })
+  }
+
+  /** Re-resolve every parked ask's localized reason after a `/lang` switch;
+   *  Chat re-renders on the switch, so the read below lands on the new
+   *  language without a store subscription. */
+  private refreshReasonLang(): void {
+    const lang = getLang()
+    if (lang === this.reasonLang) return
+    this.reasonLang = lang
+    for (const pending of [...(this.active === undefined ? [] : [this.active]), ...this.queue]) {
+      const reason = reasonOf(pending.request)
+      if (reason === undefined) delete pending.snapshot.reason
+      else pending.snapshot.reason = reason
+    }
+    this.rebuildSnapshot()
   }
 
   /** Rebuild the cached snapshot after any mutation of active. */
@@ -402,6 +443,7 @@ export class ApprovalStore implements PermissionPanelSource {
     assertCapabilityShadowPolicy('host.presentation.approve', this.runtime.mode, this.runtime.slices)
     return new Promise<ApprovalOutcome>(resolve => {
       const command = commandOf(req)
+      const reason = reasonOf(req)
       // Source badge: park() is reached through the approval/request
       // waterfall, which any in-process plugin can dispatch — the agent-id
       // gate in plugin.ts says whose SESSION it names, not that a live tool
@@ -421,7 +463,7 @@ export class ApprovalStore implements PermissionPanelSource {
         snapshot: {
           agentId: String(req.agent.id),
           toolName: req.toolName,
-          ...(req.reason !== undefined ? { reason: req.reason } : {}),
+          ...(reason !== undefined ? { reason } : {}),
           ...(command !== undefined ? { command } : {}),
           ...(external ? { external: true } : {}),
         },

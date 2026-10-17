@@ -44,10 +44,10 @@ import type { NegotiationDecision } from '../adapter/standard/types.js'
 import { cleanScalarText } from './sanitize.js'
 import type { GrantStore } from '../adapter/standard/grants.js'
 import type { HostDescriptorBuild } from '../adapter/standard/descriptor.js'
-import { isCompositionOwned, type PluginDeclaration } from './plugin-declaration.js'
+import { isCompositionOwned, pluginDeclarationIn, type PluginDeclaration, type PluginInstallNotice } from './plugin-declaration.js'
 import { extraBundles, localizedPluginText, type PluginManagerView } from './plugin-manager.js'
 import { PLUGIN_STORAGE_DIR } from './plugin-storage.js'
-import { EFFECT_LEDGER_FILE } from './effect-ledger.js'
+import { EFFECT_LEDGER_NAME } from './effect-ledger.js'
 
 /** How many plugins the matrix shows before an overflow note. */
 export const PLUGINS_MATRIX_MAX_ROWS = 20
@@ -130,9 +130,15 @@ function redactText(value: string): string {
   })
 }
 
-/** One report cell: credentials redacted first, then sanitized, then capped —
- *  truncation comes last, or a cut URL keeps the head of its own secret. */
-const cell = (value: unknown): string => cleanScalarText(redactText(String(value ?? '')), LINE_CELLS)
+/**
+ * One report cell: credentials redacted first, then sanitized, then capped —
+ * truncation comes last, or a cut URL keeps the head of its own secret.
+ *
+ * Exported for the install flow (C-4): pnpm's output and the service's error
+ * text are foreign input reaching the same transcript, and one renderer means
+ * the two surfaces cannot disagree about what a cell is.
+ */
+export const cell = (value: unknown): string => cleanScalarText(redactText(String(value ?? '')), LINE_CELLS)
 
 /** One URL field as a report cell: credentials stripped, then capped. */
 const urlCell = (value: string): string => cell(redactUrl(value))
@@ -158,13 +164,27 @@ function readLedgerRecords(file: string): LedgerLine[] {
   return records
 }
 
+/** Where the three footprint sources live. */
+export interface PluginFootprintPaths {
+  readonly dataDir: string
+  readonly ledgerFile: string
+  readonly storageDir: string
+}
+
+/** Test overrides for {@link pluginFootprintPaths}; the report's own deps satisfy it. */
+export interface PluginFootprintOverrides {
+  readonly dataDir?: string | undefined
+  readonly ledgerFile?: string | undefined
+  readonly storageDir?: string | undefined
+}
+
 /** The plugin set for the matrix: grants-file keys ∪ ledger pluginIds ∪
  *  storage namespaces ('host'/'undeclared' ledger identities are not
  *  plugins and are excluded). */
-function footprintPlugins(deps: PluginsInfoDeps, dataDir: string, ledgerFile: string, storageDir: string): string[] {
+export function pluginFootprints(paths: PluginFootprintPaths): string[] {
   const found = new Set<string>()
   try {
-    const raw: unknown = JSON.parse(readFileSync(join(dataDir, 'extension-grants.json'), 'utf8'))
+    const raw: unknown = JSON.parse(readFileSync(join(paths.dataDir, 'extension-grants.json'), 'utf8'))
     if (raw !== null && typeof raw === 'object') {
       const table = raw as { grants?: unknown; denies?: unknown }
       for (const section of [table.grants, table.denies]) {
@@ -177,13 +197,13 @@ function footprintPlugins(deps: PluginsInfoDeps, dataDir: string, ledgerFile: st
     // Missing/corrupt grants file: the GrantStore already answers deny;
     // the matrix simply has no rows from this source.
   }
-  for (const record of readLedgerRecords(ledgerFile)) {
+  for (const record of readLedgerRecords(paths.ledgerFile)) {
     if (typeof record.pluginId === 'string' && record.pluginId !== '' && record.pluginId !== 'host' && record.pluginId !== 'undeclared') {
       found.add(record.pluginId)
     }
   }
   try {
-    for (const entry of readdirSync(storageDir)) {
+    for (const entry of readdirSync(paths.storageDir)) {
       if (!entry.endsWith('.json')) continue
       const namespace = decodeURIComponent(entry.slice(0, -'.json'.length))
       if (namespace !== '') found.add(namespace)
@@ -191,8 +211,30 @@ function footprintPlugins(deps: PluginsInfoDeps, dataDir: string, ledgerFile: st
   } catch {
     // No storage directory yet: no rows from this source.
   }
-  void deps
   return [...found].sort()
+}
+
+/**
+ * The three footprint sources, resolved the way the diagnostics resolve them
+ * (test overrides first, else the packaged locations under `~/.dsh-tui`).
+ */
+export function pluginFootprintPaths(overrides: PluginFootprintOverrides = {}): PluginFootprintPaths {
+  const dataDir = overrides.dataDir ?? DATA_DIR
+  return {
+    dataDir,
+    ledgerFile: overrides.ledgerFile ?? join(dataDir, EFFECT_LEDGER_NAME),
+    storageDir: overrides.storageDir ?? join(dataDir, PLUGIN_STORAGE_DIR),
+  }
+}
+
+/**
+ * Whether one plugin id still has a footprint in this profile: a grants-file
+ * key, an effect-ledger record, or a storage namespace. The same three sources
+ * the matrix unions — a removal that left something behind is read here rather
+ * than by a second reader that could disagree with the report (C-5).
+ */
+export function pluginFootprintContains(pluginId: string, overrides: PluginFootprintOverrides = {}): boolean {
+  return pluginFootprints(pluginFootprintPaths(overrides)).includes(pluginId)
 }
 
 /** `/plugin check <path>`: official parse/projection + profile validation + negotiation. */
@@ -301,6 +343,17 @@ export type PluginArgs =
   | { readonly kind: 'check'; readonly path: string }
   | { readonly kind: 'info'; readonly spec: string }
   | { readonly kind: 'registries' }
+  /** `/plugin install <spec>`: the write path (C-4), which the UI drives. */
+  | { readonly kind: 'install'; readonly spec: string }
+  /**
+   * The three lifecycle forms (C-5), which the UI drives through
+   * `dsh-adapter/plugin-manage.ts`. `target` is the raw argument: a bundle name
+   * or a row identity, resolved by the flow against the profile it reads rather
+   * than by a grammar here.
+   */
+  | { readonly kind: 'remove'; readonly target: string }
+  | { readonly kind: 'enable'; readonly target: string }
+  | { readonly kind: 'disable'; readonly target: string }
   | { readonly kind: 'unknown'; readonly sub: string }
 
 /** Route `/plugin`'s argument text: one parser, so both halves of the report agree. */
@@ -312,6 +365,10 @@ export function parsePluginArgs(args: string): PluginArgs {
   if (sub === 'check') return { kind: 'check', path: rest.join(' ') }
   if (sub === 'info') return { kind: 'info', spec: rest.join(' ') }
   if (sub === 'registries') return { kind: 'registries' }
+  if (sub === 'install') return { kind: 'install', spec: rest.join(' ') }
+  if (sub === 'remove') return { kind: 'remove', target: rest.join(' ') }
+  if (sub === 'enable') return { kind: 'enable', target: rest.join(' ') }
+  if (sub === 'disable') return { kind: 'disable', target: rest.join(' ') }
   return { kind: 'unknown', sub: sub ?? '' }
 }
 
@@ -341,10 +398,18 @@ export function pluginsInfoLines(args: string, deps: PluginsInfoDeps): string[] 
     return lines
   }
   if (parsed.kind === 'registries') return lines
-
-  const dataDir = deps.dataDir ?? DATA_DIR
-  const ledgerFile = deps.ledgerFile ?? EFFECT_LEDGER_FILE
-  const storageDir = deps.storageDir ?? join(dataDir, PLUGIN_STORAGE_DIR)
+  // `install <spec>` is the write path (C-4): a bare one is a usage error, and
+  // the UI drives the rest — this half stays the diagnostics it always was.
+  if (parsed.kind === 'install') {
+    if (parsed.spec === '') lines.push(t('plugins-install-usage'))
+    return lines
+  }
+  // The three lifecycle forms (C-5) report themselves as they run, like an
+  // install: a bare one is a usage error, and this half stays the diagnostics.
+  if (parsed.kind === 'remove' || parsed.kind === 'enable' || parsed.kind === 'disable') {
+    if (parsed.target === '') lines.push(t('plugins-manage-usage', { sub: parsed.kind }))
+    return lines
+  }
 
   // ── Host Descriptor ──
   if (deps.host === undefined) {
@@ -365,7 +430,7 @@ export function pluginsInfoLines(args: string, deps: PluginsInfoDeps): string[] 
   }
 
   // ── 授权矩阵 ──
-  const plugins = footprintPlugins(deps, dataDir, ledgerFile, storageDir)
+  const plugins = pluginFootprints(pluginFootprintPaths(deps))
   lines.push(t('plugins-matrix-note'))
   const permissions = deps.grants.knownPermissions()
   if (permissions.length === 0) {
@@ -396,6 +461,7 @@ export function pluginsInfoLines(args: string, deps: PluginsInfoDeps): string[] 
   }
 
   // ── 台账尾 ──
+  const ledgerFile = pluginFootprintPaths(deps).ledgerFile
   const records = readLedgerRecords(ledgerFile)
   if (records.length === 0) {
     lines.push(t('plugins-ledger-empty'))
@@ -421,33 +487,88 @@ type DeclarationVerdict =
   | { readonly kind: 'invalid'; readonly error: string }
   | { readonly kind: 'decided'; readonly decision: NegotiationDecision }
 
-/** Evaluate a package's declaration exactly as `check <path>` does. */
-function declarationVerdict(deps: PluginsInfoDeps, packageName: string): DeclarationVerdict {
-  const declaration = deps.declaration?.(packageName)
-  if (declaration === undefined) return { kind: 'undeclared' }
+/**
+ * A declaration this profile can use: parsed, projected and validated against
+ * the admission catalog — the half `check <path>` and the list tags share. One
+ * implementation, so every surface that judges a declaration is judging the
+ * same thing; the caller decides what to do with the answer (the tag negotiates
+ * it further, the pre-install notice does not).
+ */
+function admitDeclaration(declaration: PluginDeclaration):
+  | { readonly error: string }
+  | { readonly manifest: ReturnType<typeof parseManifest>; readonly index: ReturnType<typeof createContractIndex> } {
   const data = loadSpecData()
-  if (data === undefined) return { kind: 'invalid', error: t('plugins-check-spec-unavailable') }
-  let manifest
+  if (data === undefined) return { error: t('plugins-check-spec-unavailable') }
+  let manifest: ReturnType<typeof parseManifest>
   try {
     manifest = parseManifest(declaration.source, { source: declaration.path })
     projectManifest(manifest)
   } catch (error) {
-    return { kind: 'invalid', error: cell(error instanceof Error ? error.message : String(error)) }
+    return { error: cell(error instanceof Error ? error.message : String(error)) }
   }
   const index = createContractIndex(data.registry, data.permissions)
   try {
     validatePlugin(index, manifest)
   } catch (error) {
-    return { kind: 'invalid', error: cell(error instanceof Error ? error.message : String(error)) }
+    return { error: cell(error instanceof Error ? error.message : String(error)) }
   }
+  return { manifest, index }
+}
+
+/** Evaluate one declaration exactly as `check <path>` does. */
+function verdictOfDeclaration(deps: PluginsInfoDeps, declaration: PluginDeclaration): DeclarationVerdict {
+  const admitted = admitDeclaration(declaration)
+  if ('error' in admitted) return { kind: 'invalid', error: admitted.error }
   const host = deps.host
   if (host === undefined) return { kind: 'invalid', error: t('plugins-check-host-unavailable') }
-  const granted = manifest.permissions.map(request => ({
+  const granted = admitted.manifest.permissions.map(request => ({
     name: request.name,
     scope: request.scope,
-    granted: deps.grants.allows({ componentId: manifest.id }, request.name, request.scope),
+    granted: deps.grants.allows({ componentId: admitted.manifest.id }, request.name, request.scope),
   }))
-  return { kind: 'decided', decision: negotiate(index, manifest, host.descriptor, granted) }
+  return { kind: 'decided', decision: negotiate(admitted.index, admitted.manifest, host.descriptor, granted) }
+}
+
+/** Evaluate a package's declaration exactly as `check <path>` does. */
+function declarationVerdict(deps: PluginsInfoDeps, packageName: string): DeclarationVerdict {
+  const declaration = deps.declaration?.(packageName)
+  if (declaration === undefined) return { kind: 'undeclared' }
+  return verdictOfDeclaration(deps, declaration)
+}
+
+/**
+ * Gate 1's pre-install statement about an install target (C-4), as data.
+ *
+ * It runs the same parse/project/validate pipeline `check <path>` and the list
+ * tags run — one implementation, so the surfaces cannot disagree — over the
+ * declaration of the target directory the caller resolved. It deliberately stops
+ * before `negotiate`: admission's five states are a statement about a *running*
+ * host, and the standing tag in `/plugin` is where they are reported after the
+ * install. What a person needs before installing is narrower and decidable: is
+ * there a declaration at all, and does this profile's catalog accept it.
+ *
+ * The evidence is the target directory and nothing else. A declaration resolved
+ * by package name would be the profile's already-installed copy of that name —
+ * a different artifact from the one being installed (another version, or a local
+ * directory), which is how a stale same-name package used to answer for a new
+ * target.
+ *
+ * The two empty answers are not the same thing, and that is the point:
+ *
+ * - a directory the caller resolved (`install <path>` specs) either carries a
+ *   package-root `dsh-plugin.json` or does not, so no file is `undeclared`;
+ * - a target with no directory to read (a registry name, a tarball, a git spec)
+ *   ships no file this machine can read, so an empty answer there is `unjudged`
+ *   — the flow cannot honestly claim a package it has never seen fails gate 1.
+ */
+export function declarationNoticeFor(
+  target: { readonly directory?: string | undefined },
+): PluginInstallNotice {
+  if (target.directory === undefined) return { kind: 'unjudged' }
+  const declaration = pluginDeclarationIn(target.directory)
+  if (declaration === undefined) return { kind: 'undeclared' }
+  const admitted = admitDeclaration(declaration)
+  return 'error' in admitted ? { kind: 'invalid', error: admitted.error } : { kind: 'declared' }
 }
 
 /**
@@ -620,7 +741,14 @@ export async function pluginServiceLines(
   const parsed = parsePluginArgs(args)
   if (parsed.kind === 'check' || parsed.kind === 'unknown') return []
   if (parsed.kind === 'info' && parsed.spec === '') return []
-  if (manager === undefined) return [t('plugins-service-unavailable')]
+  // With no service the report is the diagnostics plus the reason and the CLI
+  // route, whatever the form asked for — the write path included: the flow that
+  // would run it lives in the entry, and without a service the entry hands back
+  // no flow, so this is the sentence the person reads.
+  if (manager === undefined) return [t('plugins-service-unavailable'), t('plugins-service-unavailable-route')]
+  // The write paths report themselves line by line as they run (C-4 / C-5): with
+  // a service present, this half has nothing to add to them.
+  if (parsed.kind === 'install' || parsed.kind === 'remove' || parsed.kind === 'enable' || parsed.kind === 'disable') return []
   // The service belongs to the host: a refusal or a crash there must not take
   // the diagnostics half down with it. Every call funnels into one line, so a
   // rejected promise still leaves a readable report instead of an unhandled

@@ -113,7 +113,13 @@ check('the install wizard target comes from the manifest that declares it',
 // ── 2. Registration guards ─────────────────────────────────────────────────────
 const fakeManifest = (overrides: Partial<BackendManifest> = {}): BackendManifest =>
   ({ id: 'acme-agent', label: { kind: 'literal', text: 'Acme' }, shortLabel: 'Acme', inTree: false, ...overrides })
-const neverBackend = {} as AgentBackend
+const fakeBackend = (id: string, detection: BackendDetection = { installed: false }): AgentBackend => ({
+  id,
+  descriptor: { label: 'Fake' },
+  detect: async () => detection,
+  open: async (): Promise<AgentSession> => { throw new Error('not used') },
+})
+const neverBackend = fakeBackend('acme-contribution')
 check('a duplicate id is refused',
   throws(() => registerBackend({ manifest: fakeManifest({ id: 'dsh', inTree: true }) })))
 check('a plugin may not claim a built-in id',
@@ -217,11 +223,59 @@ check('ids must match the syntax gate',
   ['has:colon', '..', 'a/b', 'Acme', '', 'x'.repeat(33)].every(id => !isBackendIdSyntax(id))
     && throws(() => registerBackend({ manifest: fakeManifest({ id: 'has:colon' }) })))
 
+// ── 2c. A contribution's registry entry (D-1) ───────────────────────────────────
+// The third-party path registers through `backendManifestOf()`, the inverse of the
+// projection the seed is dogfooded through. What it may put in a registry entry is
+// therefore smaller than an in-tree manifest: no `alwaysAvailable`, no `nativeKey`,
+// no `vendorPackages`, no `backendExport`, and `inTree: false` — the one fact that
+// flips every other rule in this file.
+const { backendContributionOf, backendManifestOf } = await import('../src/dsh-adapter/backend-contribution.js')
+const { validateBackendSpec } = await import('../src/adapter/spec/tui-contributions.js')
+const CONTRIBUTION_ID = 'acme-contribution'
+const contributionSpec = validateBackendSpec({
+  id: CONTRIBUTION_ID,
+  label: { text: 'Acme Contribution' },
+  shortLabel: 'Acme',
+  product: 'acme',
+  capabilities: ['permissions', 'models'],
+  grants: [],
+  // The executor this host implements: the one value a declaration can install through today (D-2).
+  install: { executor: PNPM_PROFILE_ADD, specifier: 'acme-sdk@1.2.3', version: '1.2.3' },
+})
+const contributionManifest = backendManifestOf(contributionSpec)
+check('a declaration projects to a registry entry that is out-of-tree and carries only declared fields',
+  contributionManifest.inTree === false
+  && contributionManifest.alwaysAvailable === undefined && contributionManifest.nativeKey === undefined
+  && contributionManifest.vendorPackages === undefined && contributionManifest.backendExport === undefined
+  && contributionManifest.label.kind === 'literal' && contributionManifest.label.text === 'Acme Contribution'
+  && contributionManifest.product === 'acme',
+  JSON.stringify(contributionManifest))
+check('a pool hook a declaration names is carried into the entry, and nothing else is invented',
+  backendManifestOf({ ...contributionSpec, unloadExport: 'closeAcmePool' }).unloadExport === 'closeAcmePool')
+check('a declaration registers as-is: the projection is what the registry admits',
+  (() => {
+    registerBackend({ manifest: contributionManifest, load: async () => ({ backend: neverBackend }) })
+    const entry = getBackend(CONTRIBUTION_ID)
+    return entry !== undefined
+      && JSON.stringify(entry.manifest) === JSON.stringify(contributionManifest)
+      && entry.installable === true
+      && parseBackendChoice(CONTRIBUTION_ID) === CONTRIBUTION_ID
+  })())
+check('the two directions are inverses on the fields a declaration can carry',
+  JSON.stringify(backendContributionOf(backendManifestOf(contributionSpec)))
+    === JSON.stringify(backendContributionOf(contributionManifest)))
+check('a handler is read from the module namespace under the documented default export name',
+  await loadBackend(CONTRIBUTION_ID as import('../src/kernelPrefs.js').KernelBackendId) === neverBackend)
+
 // ── 3. The two-stage parse on all five boot sources (D1) ────────────────────────
 const UNINSTALLED = 'acme-agent'
 check('syntax passes it, membership does not',
   isBackendIdSyntax(UNINSTALLED) && !isRegisteredBackend(UNINSTALLED) && parseBackendChoice(UNINSTALLED) === undefined)
-check('--backend / Config row: an unregistered value reads as "not configured" (dsh)',
+// The membership-complete parse (`normalizeBackendChoice` / `parseBackendChoice`).
+// The Config *row* no longer applies it at schema time: it keeps the syntax half
+// so an id whose bundle registers during `apply` survives, and the boot applies
+// this gate after that assembly (pinned by verify-backend-config.ts).
+check('the membership parse reads an unregistered value as "not configured", and normalizes case/blanks',
   normalizeBackendChoice(UNINSTALLED) === undefined && normalizeBackendChoice(' Codex ') === 'codex')
 check('handoff env: an unregistered value is ignored, the memory still wins',
   resolveRememberedBackend({ handoff: parseBackendChoice(UNINSTALLED), memory: 'claude' }) === 'claude')
@@ -277,12 +331,6 @@ check('and opens a backend in exactly one place, inside the "not dsh" branch (D1
 // ── 5. Detection failures degrade one row, never the probe ─────────────────────
 {
   const imports: string[] = []
-  const fakeBackend = (detection: BackendDetection): AgentBackend => ({
-    id: 'fake',
-    descriptor: { label: 'Fake' },
-    detect: async () => detection,
-    open: async (): Promise<AgentSession> => { throw new Error('not used') },
-  })
   registerBackend({
     manifest: fakeManifest({ id: 'probe-bad', backendExport: 'backend' }),
     load: async () => {
@@ -294,7 +342,7 @@ check('and opens a backend in exactly one place, inside the "not dsh" branch (D1
     manifest: fakeManifest({ id: 'probe-ok', backendExport: 'backend' }),
     load: async () => {
       imports.push('probe-ok')
-      return { backend: fakeBackend({ installed: true, version: '9.9.9' }) }
+      return { backend: fakeBackend('probe-ok', { installed: true, version: '9.9.9' }) }
     },
   })
   const statuses = await probeKernels(new Context(), tmp)
@@ -311,18 +359,18 @@ check('and opens a backend in exactly one place, inside the "not dsh" branch (D1
     manifest: fakeManifest({ id: 'pool-idle', backendExport: 'backend', unloadExport: 'closeIdle' }),
     load: async () => {
       lazilyImported += 1
-      return { backend: neverBackend, closeIdle: async () => { closed.push('pool-idle') } }
+      return { backend: fakeBackend('pool-idle'), closeIdle: async () => { closed.push('pool-idle') } }
     },
   })
   registerBackend({
     manifest: fakeManifest({ id: 'pool-one', backendExport: 'backend', unloadExport: 'closeOne' }),
-    load: async () => ({ backend: neverBackend, closeOne: async () => { closed.push('pool-one') } }),
+    load: async () => ({ backend: fakeBackend('pool-one'), closeOne: async () => { closed.push('pool-one') } }),
   })
   registerBackend({
     manifest: fakeManifest({ id: 'pool-two', backendExport: 'backend', unloadExport: 'closeTwo' }),
     // Records itself and *then* fails: the point is that it ran, and that its
     // failure neither stopped the earlier hook nor reached the caller.
-    load: async () => ({ backend: neverBackend, closeTwo: async () => { closed.push('pool-two'); throw new Error('unload failed') } }),
+    load: async () => ({ backend: fakeBackend('pool-two'), closeTwo: async () => { closed.push('pool-two'); throw new Error('unload failed') } }),
   })
 
   // Nothing loaded yet: closing must not even import the idle entry's module.

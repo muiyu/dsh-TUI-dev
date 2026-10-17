@@ -18,14 +18,15 @@ notePoolOpen()
 /** The session surfaces a probe session serves, overridable so the gate can build
  *  the deliberately-broken variant (serving a name its declaration lacks). */
 export interface ProbeOptions {
+  readonly id?: string
   readonly capabilities?: AgentSession['capabilities']
   readonly detection?: BackendDetection
 }
 
-function probeSession(target: OpenTarget, capabilities: AgentSession['capabilities']): AgentSession {
+function probeSession(id: string, target: OpenTarget, capabilities: AgentSession['capabilities']): AgentSession {
   const sessionId = target.kind === 'resume' ? target.sessionId : 'probe-created'
   return {
-    ref: { backendId: 'probe-backend', sessionId },
+    ref: { backendId: id, sessionId },
     cwd: target.kind === 'create' ? target.cwd : process.cwd(),
     status: 'idle',
     capabilities,
@@ -40,12 +41,13 @@ function probeSession(target: OpenTarget, capabilities: AgentSession['capabiliti
 
 /** A fresh probe backend. `probeBackend` below is the instance the registry loads. */
 export function createProbeBackend(options: ProbeOptions = {}): AgentBackend {
+  const id = options.id ?? 'probe-backend'
   const capabilities = options.capabilities ?? {}
   return {
-    id: 'probe-backend',
+    id,
     descriptor: { label: 'Probe Backend' },
     detect: async (_host: BackendHost) => options.detection ?? { installed: true, version: '0.1.0' },
-    open: async (target: OpenTarget, _host: BackendHost) => probeSession(target, capabilities),
+    open: async (target: OpenTarget, _host: BackendHost) => probeSession(id, target, capabilities),
     catalog: {
       list: async () => [],
       info: async sessionId => ({ id: sessionId, title: 'Probe session', updatedAt: 0 }),

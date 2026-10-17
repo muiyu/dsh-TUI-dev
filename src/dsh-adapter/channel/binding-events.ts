@@ -37,6 +37,7 @@ export function createBindingEvents(ctx: Context, deps: {
    *  session needs one baseline read to show its occupancy before the next
    *  request reports usage. */
   seedContextOccupancy?(session: unknown): void
+  seedTeam?(session: unknown): void
   inputConvergence: InputConvergence
   modelSelection: ReturnType<typeof createModelSelection>
   modelActions: { applyPreferredEffort(): Promise<void> }
@@ -147,6 +148,7 @@ export function createBindingEvents(ctx: Context, deps: {
     onBind({ capture, current, register }: BindingScope): void {
       deps.seedActivity?.(deps.binding.agent.session)
       deps.seedContextOccupancy?.(deps.binding.agent.session)
+      deps.seedTeam?.(deps.binding.agent.session)
       deps.modelSelection.bind(deps.binding.agent, { provider: deps.state.provider, model: deps.state.model })
       const selected = deps.modelSelection.selection.current
       // A parked turn may not have logged its first selected request yet.

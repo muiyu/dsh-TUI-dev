@@ -1,5 +1,6 @@
 import { type SessionEvent } from '@deepseek-ai/dsh-session'
 import { toolResultPayload } from '../compat/messages.js'
+import { t } from '../../i18n.js'
 import type { ChatRow, ToolResultView, ToolViewPresenter } from './types.js'
 import { markChannelReadDirty } from '../../adapter/channel/read-view.js'
 import { ARGS_PREVIEW_LIMIT, LOCAL_OUTPUT_LIMIT, MAX_ROWS, preview, RESULT_PREVIEW_LIMIT } from '../../channel/transcript.js'
@@ -233,8 +234,25 @@ export function harnessToolResultView(
 export function toolErrorText(event: SessionEvent<'tool/result'>): string {
   const failure = event.data.error
   if (failure === undefined) return toolResultPayload(event.data.message).isError ? toolResultText(event) : ''
-  const identity = `${failure.name}: ${failure.code}`
-  const detail = toolResultText(event)
+  return toolFailureText(failure, toolResultText(event))
+}
+
+/** One structured tool failure (`tool/result.error`) as display text: its
+ *  `name: code` identity plus the result detail. An auto-review denial reads
+ *  as a localized "denied, not executed" plus the reviewer's `reason`, never
+ *  its English detail (that only restates the denial); other failures' `reason`
+ *  repeats their detail and stays out. Shared by the transcript and the
+ *  subagent cards. */
+export function toolFailureText(failure: unknown, detail: string): string {
+  const record = failure !== null && typeof failure === 'object' ? failure as Record<string, unknown> : {}
+  if (record.code === 'AUTO_REVIEW_DENIED') {
+    const identity = t('tool-error-auto-review-denied')
+    const reason = typeof record.reason === 'string' ? record.reason.trim() : ''
+    return reason !== '' ? `${identity} — ${reason}` : identity
+  }
+  const identity = typeof record.name === 'string' && typeof record.code === 'string'
+    ? `${record.name}: ${record.code}`
+    : String(failure)
   return detail === '' || detail === identity ? identity : `${identity} — ${detail}`
 }
 

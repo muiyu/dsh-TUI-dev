@@ -10,6 +10,7 @@
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { PreviewEntry } from './sessions/index.js'
 import type { AgentViewStatus } from './channel.js'
+import { withoutTeammateReminder } from './compat/agent-team-0.2.0.js'
 
 /** Agent-view row ordering: needs-input first, stopped last. */
 export const AGENT_VIEW_STATUS_ORDER: readonly AgentViewStatus[] = [
@@ -92,7 +93,8 @@ export function foldAgentViewEvents(
     switch (event.type) {
       case 'user/message': {
         fold.hasTurns = true
-        const text = agentViewTextOf(event.data.content)
+        // compat(dsh 0.2.0, log): a 0.2.0 teammate's first prompt drops its identity block.
+        const text = agentViewTextOf(fold.firstPrompt.length === 0 ? withoutTeammateReminder(event.data).content : event.data.content)
         if (fold.firstPrompt.length === 0 && text !== undefined) fold.firstPrompt = oneLine(text)
         // The prompt stands in for the summary only until the session
         // starts doing something (a tool call or assistant text replaces it).

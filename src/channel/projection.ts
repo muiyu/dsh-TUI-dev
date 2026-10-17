@@ -778,6 +778,15 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
       }
       return
     }
+    // A team member's message to this session: its own bubble, labelled with
+    // the sender, never the human's last prompt.
+    if (event.source === 'team-message') {
+      if (event.text === '') return
+      appendRow({ id: deps.rowIds.value, kind: 'user', label: 'team-message', text: event.text, ...(event.sender === undefined ? {} : { sender: event.sender }), seq: event.seq })
+      state.contextSegments.prompt += estimateTokens(textOfBlocks(event.blocks))
+      deps.rowIds.value += 1
+      return
+    }
     // Injected context (plugin/skill/goal source) is not a human bubble;
     // v1 renders direct human prompts only.
     if (event.source !== 'user') return

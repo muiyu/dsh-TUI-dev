@@ -212,6 +212,24 @@ const GROUPS = {
 // 流式行离开虚拟窗口时保留实测行高：不得因回落到 2 行估算而塌陷，
 // 不得改写 committed/painted 位置、接回跟随或移动 xterm 中的正文锚点。
     ["verify-post-shrink-anchor", ['node', '--import', 'tsx/esm', 'scripts/verify-post-shrink-anchor.tsx']],
+// 视口上方发生**真实**收缩（思考卡收起 / 工具卡结算）时，贴底的手动锚点
+// 必须靠滚动锚定保持原地：paint 不得与 committed 分歧、不得越界、xterm 中
+// 的正文锚点逐帧一致。verify-post-shrink-anchor 覆盖的是测量假象那条路径。
+    ["verify-scroll-fold-anchor", ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-fold-anchor.tsx']],
+// 同一折叠，但折叠卡**已被挂载**（窗口内、完全在视口上方）：渲染期那条回退到
+// 2 行估算的路径在这里不成立——估算误差是「折叠后行高 − 2」，且以正向差额
+// 落地、被只补偿收缩的单向修正丢弃，留下永久偏移（基线 740ce628 实测多滚
+// 5 行，读者视线落到折叠卡尾部）。保留估高并在提交时按 fresh Yoga 修正，逐帧校验原位。
+    ["verify-scroll-fold-anchor-mounted", ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-fold-anchor-mounted.tsx']],
+// 失效的高度缓存不得被当成真实收缩：Ctrl+O 重签所有行的签名，普通提示行
+// 的真实高度不变，只有 offsets[] 回退到 2 行估算。夹具让整表都留在挂载
+// 窗口内（topPad/bottomPad 0），锚定修正就是唯一能改动 committed 位置的
+// 路径——坏基线上它会把读者滚走 3 行，main（无本改动）保持不动。
+    ["verify-scroll-anchor-invalidation", ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-anchor-invalidation.tsx']],
+// 混合失效后重挂必须归还估高差；正向修正不得接回粘底或被旧窗口夹住，
+// header 仍拥有视口顶部时不得把 Home 用户滚离原位。
+    ["verify-scroll-anchor-remeasurement", ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-anchor-remeasurement.tsx']],
+    ['verify-scroll-anchor-remeasurement-narrow', ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-anchor-remeasurement.tsx'], { DSH_TEST_COLUMNS: '60' }],
 // 长会话冷/热窗口跳转、绘制边界发布与回底挂载预算（不能等滚轮救活）。
     ['verify-scroll-jumps', ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-jumps.tsx']],
     ['verify-scroll-jumps-narrow', ['node', '--import', 'tsx/esm', 'scripts/verify-scroll-jumps.tsx'], { DSH_TEST_COLUMNS: '60' }],
@@ -461,6 +479,21 @@ const GROUPS = {
   ],
   'session-workspace': [
     ["verify-backend-startup", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-startup.ts']],
+// D-1 装配点（backend-assembly.ts）：profile 声明的已装 bundle 的 `x-dsh-tui` Backend 声明变成
+// 注册表条目——真 Cordis 组合 + 假 profile/假 bundle：五态（compatible / degraded 记待决 /
+// waiting_authorization 注册但不进 picker）、拒因归属到具体 bundle 且不拖垮别的 bundle、
+// entry 走 Loader 自己的 resolver（缺席即拒绝猜）、第三方 entry 的固定事实（inTree:false、
+// 字面量 label、不得出现 alwaysAvailable/nativeKey、backendExport 缺省 `backend`）、
+// 模块懒加载与池钩子只在真的加载过时关，以及**时序**：子进程里"先解析后装配"的坏基线必红
+// （装了的后端被读成未知值回落 dsh），正面是装配在先、且不依赖任何 bundle 行激活。
+// 归组理由（stage-d-plan §2 末段）：它测的是 backend 族的注册与解析语义，与同组的
+// verify-backend-registry 同一对象；#1568 的 verify-admission-loader 落在 input-terminal
+// 是因为它测的是准入 loader 本身，本门禁不碰那条链路。
+    ["verify-backend-assembly", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-assembly.ts']],
+// Discovery must precede Config membership checks and the final DSH/light host
+// selection. Exercise the real Schema, Cordis Loader and profile include.
+    ["verify-backend-config", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-config.ts']],
+    ["verify-backend-host", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-host.ts']],
 // 启动恢复 fail-closed（roadmap §6 第 11 条，B-2a）：纯函数半边（ResumeTarget 三态与 retry
 // 容错、显式 id 原样透传、裸 flag 走调用方 fallback、`--` 之后不再解析）、启动器半边（裸
 // 请求派生不出目标即报错退出，而不是把 --continue 交给下游；三个重试分支都带
@@ -814,6 +847,7 @@ const GROUPS = {
     ['verify-guide', ['node', 'scripts/verify-guide.mjs']],
     ['verify-message-compat', ['node', 'scripts/verify-message-compat.mjs']],
     ['verify-settings-compat', ['node', '--import', 'tsx/esm', 'scripts/verify-settings-compat.mjs']],
+    ['verify-web-settings', ['node', '--import', 'tsx/esm', 'scripts/verify-web-settings.tsx']],
 // 设置读点的 ns 归属（issue #1124）：分区注册与写入用 Config owner 的 Loader id
 // （可为自定义 id），读点（channel.autoRecapOnOpen、Chat 的 lang 镜像、/reload 的
 // langOverriddenBySettings）必须用同一个 ns —— 写死 'dsh-tui' 会让非默认挂载
@@ -835,6 +869,24 @@ const GROUPS = {
 // 告警、压缩检查点不改写本地量），投影缺席（裸 cordis.yml 无 token-meter）时回退到
 // 上次成功请求的计费采样且软失败不抛。
     ["verify-context-occupancy", ['node', '--import', 'tsx/esm', 'scripts/verify-context-occupancy.ts']],
+// Agent Teams 读侧回归（#1241）：agentTeam 投影 store（仅 Lead 的隐式单人团队视为
+// 无团队、teammate 经 parentSession 读 Lead、他会话/他 key 不串、迟到 registry 补
+// seed）、0.2.1 relay 团队消息的气泡（按前缀块取发送者并剔除、不算人类提问、不进
+// 回退目标）与团队工具单行卡片（与同名旧版子代理控件区分）。
+    ["verify-agent-teams", ['node', '--import', 'tsx/esm', 'scripts/verify-agent-teams.ts']],
+// compat(dsh 0.2.0, log)：0.2.0 邮箱来源的团队消息、teammate 首条消息的身份块与 send_message 结果经 compat 归一化后，
+// 与 0.2.1 形态在翻译器（含回放）、子代理投影、工具卡上产出完全相同；随 compat 模块一起删除。
+    ["verify-agent-teams-compat-0.2.0", ['node', '--import', 'tsx/esm', 'scripts/verify-agent-teams-compat-0.2.0.ts']],
+// 团队消息气泡渲染（#1241）：发送者行 + 悬挂缩进正文，常规与窄终端宽度、宽字符下不越界。
+    ["verify-team-message-bubble", ['node', '--import', 'tsx/esm', 'scripts/verify-team-message-bubble.tsx']],
+// 代理面板的团队模式（#1241 第二阶段）：名单与子代理行按 id 合并、状态合成（跑完的
+// teammate 是空闲而非完成、failed phase 优先）、只读任务板与失败横幅；整屏与侧栏、
+// 窄宽度与宽字符成员名下不越界，只在名单里的成员不进详情。
+    ["verify-team-dashboard", ['node', '--import', 'tsx/esm', 'scripts/verify-team-dashboard.tsx']],
+// 团队模式开关（#1241）：assembly 里有 spawn_teammate 才去掉 subagent / subagent_fork、
+// plugin-manager/changed 后团队 store 随服务清空与恢复、/team status|on|off 与关闭时
+// 有成员运行的确认（/plugin disable 团队 bundle 同问）。
+    ["verify-team-mode", ['node', '--import', 'tsx/esm', 'scripts/verify-team-mode.ts']],
 // 分段估算口径回归（#1170）：estimateTokens 由 chars/4 改为 CJK 感知的纯函数——
 // 单条纯 ASCII 与旧口径相同（显式快路径；跨消息累加因改为逐条 ceil 会有 ≤1
 // token/条的舍入差），中文/全角按 ~1.4 字符/token、其它脚本按 ~2；单调不减、
@@ -925,6 +977,10 @@ const GROUPS = {
 // 共享权限面板 store：FIFO、选项与呈现规则、四种结局（含拒绝理由）、撤回/会话释放/
 // 拆除时不重复作答；channel 把会话的 permission/question 事件接到 store 与问卷。
     ["verify-permission-store", ['node', '--import', 'tsx/esm', 'scripts/verify-permission-store.ts']],
+// 自动授权审查的偏好学习：选 auto 不写偏好、旧偏好 auto 不 seed、卸载迁移
+// 不学习（含进行中的外部 /permission 切换）、picker/手打路径的目标登记、
+// catalog-changed 后的名册刷新，以及 traceable 服务下快照缓存必须命中。
+    ["verify-permission-prefs", ['node', 'scripts/verify-permission-prefs.mjs']],
 // Claude 权限桥（假 Query）：允许一次/始终允许/拒绝、选项生成与抑制、死锁规则、
 // AskUserQuestion、ExitPlanMode、permission_denied 记录；同一 requestId 重投后任一处
 // 取消都只结算一次。
@@ -1007,6 +1063,8 @@ const GROUPS = {
 // 每种决策映射、拒绝+理由（cancel+followup）、外部结算、重投只显示一次、
 // 问卷与取消（V7）、dispose 撤回、录制的 s1b 审批端到端。
     ["verify-codex-approvals", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-approvals.ts']],
+// Codex 非阻塞问卷：异步消息继续运行，答案按原生信封插话/排队，真源回放与生命周期清理。
+    ["verify-codex-async-questions", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-async-questions.ts']],
 // 真实 Chat 挂在 Codex 会话（假 app-server）上：审批面板文案、命令卡输出、
 // 流式回复、diff 卡、问卷、Esc 中断；80/40 列 × inline/fullscreen。
     ["verify-codex-chat", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-chat.tsx']],
@@ -1156,6 +1214,7 @@ const GROUPS = {
 // /model 保留会话与自动标题资格；路由及其异步快照跟随停放中的 agent。
     ["verify-session-title-lineage", ['node', '--import', 'tsx/esm', 'scripts/verify-session-title-lineage.ts']],
     ["verify-model-route-lifetime", ['node', '--import', 'tsx/esm', 'scripts/verify-model-route-lifetime.ts']],
+    ['verify-model-completion-invalidate', ['node', 'scripts/verify-model-completion-invalidate.mjs']],
     ["verify-session-v3", ['node', '--import', 'tsx/esm', 'scripts/verify-session-v3.ts']],
     ["verify-session-tree-generations", ['node', '--import', 'tsx/esm', 'scripts/verify-session-tree-generations.ts']],
 // 裸 ● 空行回归：纯思考/纯工具步骤（无文本块）的 assistant/message

@@ -24,7 +24,7 @@ import type { AgentEvent, AgentEventMeta } from '../../../agent/events.js'
 import type { AgentSessionRef } from '../../../agent/refs.js'
 import type { AgentInput, AgentSession, AgentSessionStatus, CancelCause, SubmitPlacement } from '../../../agent/session.js'
 import { codexText, installCodexLocale } from '../text.js'
-import { CODEX_BACKEND_ID, codexVersionDrift, VALIDATED_CODEX_VERSIONS } from '../contract.js'
+import { CODEX_BACKEND_ID, codexVersionDrift, compareCodexVersions, MIN_CODEX_BEFORE_TURN_FORK_VERSION, parseCodexVersion, VALIDATED_CODEX_VERSIONS } from '../contract.js'
 import { CODEX_MODE_PARAMS, DEFAULT_CODEX_MODE, isCodexModeId, modeIdOf } from '../modes.js'
 import { arr, errorText, num, rec, str, text, type Rec } from '../narrow.js'
 import { CLIENT, NOTIFY } from '../protocol/index.js'
@@ -37,6 +37,7 @@ import { rateLimitOf } from '../translate/usage.js'
 import { resolveCodexStartOptions } from '../prefs.js'
 import { createCodexAuthCapability } from '../auth/status.js'
 import { createApprovalBridge } from './approvals.js'
+import { createAsyncQuestions } from './async-questions.js'
 import { createCodexControls } from './controls.js'
 import { createCodexCommands } from './commands.js'
 import { createPlanReview, PLAN_IMPLEMENTATION_PROMPT } from './plan-review.js'
@@ -227,6 +228,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
     closed: () => disposing || permanentlyLost,
     forceClose: (turnId, reviewTurnId) => {
       output.flush()
+      asyncQuestions.withdraw()
       seenOf(turnId).ended = true
       if (reviewTurnId !== undefined) seenOf(reviewTurnId).ended = true
       emit([...live.forceClose({ kind: 'interrupted' }), { type: 'session.status', status: 'idle' }])
@@ -250,6 +252,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
     enqueueFollowup: (id, followup) => input.enqueueFollowup(id, followup),
     interruptTurn: () => { void input.interrupt() },
   })
+  const asyncQuestions = createAsyncQuestions({ input, emit: events => emit(events, 'sync', true) })
 
   const activity = createCodexActivity({ clock, now: ctx.now, emit })
   const subagents = createCodexSubagents({ hub, cwd: opened.cwd, threadId: () => threadId, nextSeq: ctx.nextSeq, now: ctx.now, emit: (events, wake) => deliver(events, wake ?? 'sync'), debug })
@@ -335,6 +338,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
     if (next.threadId === '') throw new Error(codexText('codex-open-failed', { err: 'no thread id' }))
     const previous = threadId
     approvals.withdrawAll()
+    asyncQuestions.withdraw()
     authBridge?.withdrawAll()
     output.close()
     for (const unroute of childRoutes.values()) unroute()
@@ -413,6 +417,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
       activity.notification(method, params)
       tasks.notification(method, params)
       if (goals.notification(method, params)) return
+      asyncQuestions.notification(method, params)
       commands.note(method)
       if (controls.note(method, params)) return
       const before: AgentEvent[] = []
@@ -452,6 +457,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
       }
       if (method === NOTIFY.turnCompleted) {
         approvals.turnEnded()
+        asyncQuestions.withdraw()
         const turn = rec(params.turn)
         deliver([...before, ...events, { type: 'session.status', status: 'idle' }], wakeOf(method, events))
         const activeTurnId = input.activeTurnId
@@ -479,6 +485,7 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
       sideQueries.reset()
       permanentlyLost = permanent
       approvals.withdrawAll()
+      asyncQuestions.withdraw()
       authBridge?.withdrawAll()
       activity.reset()
       planReview.withdraw()
@@ -695,12 +702,21 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
           if (selected === undefined) return { kind: 'refused', reason: codexText('codex-anchor-missing') }
           if (input.busy()) return { kind: 'refused', reason: codexText('codex-command-idle') }
           const previous = history.previousTurnId(anchor)
-          const retained = history.turns
-          const index = retained.findIndex(turn => str(turn.id) === selected)
-          if (previous === undefined && (index < 0 || history.capability.hasOlder())) return { kind: 'refused', reason: codexText('codex-rewind-load-older') }
-          const response = rec(await hub.call(previous === undefined ? CLIENT.threadStart : CLIENT.threadFork, previous === undefined
-            ? { cwd: opened.cwd, ...resumeOverrides() }
-            : { threadId, lastTurnId: previous, excludeTurns: true, ...resumeOverrides() }))
+          // A daemon may differ from the local CLI. Use the live handshake,
+          // and never let an unknown/old server ignore the cutoff silently.
+          const serverVersion = parseCodexVersion(hub.info?.userAgent ?? '')
+          if (previous === undefined && (serverVersion === undefined || (compareCodexVersions(serverVersion, MIN_CODEX_BEFORE_TURN_FORK_VERSION) ?? -1) < 0)) {
+            return { kind: 'refused', reason: codexText('codex-rewind-upgrade', { min: MIN_CODEX_BEFORE_TURN_FORK_VERSION }) }
+          }
+          // Codex can cut before a known turn even when its predecessor is
+          // not loaded or retained locally. For the first turn this persists
+          // an empty branch; a turnless thread/start cannot be resumed.
+          const response = rec(await hub.call(CLIENT.threadFork, {
+            threadId,
+            ...(previous === undefined ? { beforeTurnId: selected } : { lastTurnId: previous }),
+            excludeTurns: true,
+            ...resumeOverrides(),
+          }))
           const id = str(rec(response?.thread)?.id)
           if (id === undefined) throw new Error(codexText('codex-open-failed', { err: 'no thread id' }))
           await hub.call(CLIENT.threadUnsubscribe, { threadId: id })
@@ -718,11 +734,13 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
       questions: {
         respond: (requestId, answers) => {
           if (authBridge?.respondQuestion(requestId, answers)) return
+          if (asyncQuestions.owns(requestId)) { asyncQuestions.respond(requestId, answers); return }
           if (planReview.owns(requestId)) planReview.respond(requestId, answers)
           else approvals.respondQuestion(requestId, answers)
         },
         cancel: requestId => {
           if (authBridge?.cancelQuestion(requestId)) return
+          if (asyncQuestions.owns(requestId)) { asyncQuestions.cancel(requestId); return }
           if (planReview.owns(requestId)) planReview.cancel(requestId)
           else approvals.cancelQuestion(requestId)
         },
@@ -763,13 +781,17 @@ export async function openCodexSession(deps: CodexSessionDeps): Promise<AgentSes
     },
     async cancel(cause: CancelCause) {
       if (disposing) return { stillQueued: [], outcome: 'unknown' }
-      if (cause === 'switch' || cause === 'dispose') approvals.withdrawAll()
+      if (cause === 'switch' || cause === 'dispose') {
+        approvals.withdrawAll()
+        asyncQuestions.withdraw()
+      }
       return input.cancel(cause)
     },
     dispose(): Promise<void> {
       if (disposePromise !== undefined) return disposePromise
       disposePromise = (async () => {
         approvals.withdrawAll()
+        asyncQuestions.withdraw()
         authBridge?.dispose()
         planReview.withdraw()
         output.close()

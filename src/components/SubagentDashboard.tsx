@@ -1,6 +1,6 @@
 import React from 'react'
 import { Box, Text, useInput, ScrollBox, type ScrollBoxHandle, useTerminalSize } from '../ui.js'
-import { SubagentCard } from './SubagentCard.js'
+import { SubagentCard, teamStatusGlyph } from './SubagentCard.js'
 import type { SubagentState } from '../dsh-adapter/subagents.js'
 import type { Theme } from '../theme.js'
 import { t } from '../i18n.js'
@@ -10,6 +10,9 @@ import { usePanelInput } from './sidePanel/usePanelInput.js'
 import type { SidePanelKeyFlags } from './sidePanel/types.js'
 import { AgentMessagesSummary } from './messages/AgentMessageFlow.js'
 import type { AgentMessageView, AgentIdentity } from './messages/agentTeam.js'
+import type { TeamTask, TeamView } from '../adapter/ports/channel-view.js'
+import { isTeamTaskBlocked, teamDashboardModel, teamTaskProgress, type TeamMemberRow } from './teamRoster.js'
+import { isMinimalUiMode } from '../minimalUiMode.js'
 
 export interface SubagentDashboardProps {
   subagents: readonly SubagentState[]
@@ -25,6 +28,12 @@ export interface SubagentDashboardProps {
   onOpenView?: (agentId: string) => void
   /** 代理↔代理消息流：每张卡下显示最后一条 from → to 摘要。 */
   messages?: readonly AgentMessageView[]
+  /** Agent Teams: present → team mode (members joined with their subagent
+   *  rows, a read-only task board, the failure banner). */
+  team?: TeamView
+  /** The session on screen: inside a teammate the subagent rows are its own
+   *  children, so the roster is not joined with them. */
+  sessionId?: string
   /** `panel` 挂在侧栏宿主里（去外层 padding、键盘走 usePanelInput 分发器）；
    *  default（缺省）与整屏形态逐字节一致。 */
   variant?: 'default' | 'panel'
@@ -57,12 +66,76 @@ export function ExitButton({ onClick }: { onClick: () => void }): React.ReactNod
   )
 }
 
+/** One focusable dashboard row; a roster-only member has no subagent row
+ *  yet, so it has neither a detail nor an Agent View target. */
+interface DashboardEntry {
+  readonly key: string
+  readonly subagent?: SubagentState
+  readonly teamRow?: TeamMemberRow
+  readonly nested: boolean
+}
+
+/** A teammate the host has not announced as a subagent yet. */
+function TeamRosterOnlyRow({ row, focused, panelMode, self }: { row: TeamMemberRow; focused: boolean; panelMode: boolean; self: boolean }): React.ReactNode {
+  const { glyph, color } = teamStatusGlyph(row.status, isMinimalUiMode())
+  return (
+    <Box flexDirection="row" paddingLeft={1} marginBottom={panelMode ? 0 : 1}>
+      <Box flexShrink={0} marginRight={1}><Text color={color}>{glyph}</Text></Box>
+      <Box flexGrow={1} flexShrink={1} overflow="hidden">
+        <Text wrap="truncate-end">
+          <Text bold color={focused ? 'accent' : undefined}>{row.member.name}</Text>
+          {self && <Text dimColor>{' · ' + t('team-self-mark')}</Text>}
+        </Text>
+      </Box>
+      <Box flexShrink={0} marginLeft={1}>
+        <Text color={focused ? 'accent' : color} dimColor={row.status === 'provisioning'}>{t(`team-status-${row.status}`)}</Text>
+      </Box>
+    </Box>
+  )
+}
+
+const TASK_GLYPH: Record<TeamTask['status'], { readonly glyph: string; readonly color: 'subtle' | 'accent' | 'success' }> = {
+  pending: { glyph: '○', color: 'subtle' },
+  in_progress: { glyph: '◐', color: 'accent' },
+  completed: { glyph: '●', color: 'success' },
+}
+
+/** The team's shared task board, read-only; narrow widths drop the owner. */
+function TeamTaskBoard({ tasks }: { tasks: readonly TeamTask[] }): React.ReactNode {
+  const { columns } = useTerminalSize()
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      <Text dimColor wrap="truncate-end">{t('team-tasks-title', teamTaskProgress(tasks))}</Text>
+      {tasks.length === 0 && <Text dimColor>{'  ' + t('team-tasks-empty')}</Text>}
+      {tasks.map(task => (
+        <Box key={task.id} flexDirection="row" paddingLeft={1}>
+          <Box flexShrink={0} marginRight={1}><Text color={TASK_GLYPH[task.status].color}>{TASK_GLYPH[task.status].glyph}</Text></Box>
+          <Box flexGrow={1} flexShrink={1} overflow="hidden">
+            <Text dimColor={task.status === 'completed'} wrap="truncate-end">{task.subject}</Text>
+          </Box>
+          {columns >= 40 && task.ownerName !== undefined && (
+            <Box flexShrink={0} marginLeft={1}><Text dimColor>{'@' + task.ownerName}</Text></Box>
+          )}
+          {isTeamTaskBlocked(task) && (
+            <Box flexShrink={0} marginLeft={1}><Text color="warning">{t('team-task-blocked')}</Text></Box>
+          )}
+          {task.writeScopeWarnings.length > 0 && (
+            <Box flexShrink={0} marginLeft={1}><Text color="warning">{'⚠' + task.writeScopeWarnings.length}</Text></Box>
+          )}
+        </Box>
+      ))}
+    </Box>
+  )
+}
+
 /**
  * SubagentDashboard — overlay panel showing all active/recent subagents.
  * Keyboard: up/down to navigate, Enter to view detail, Esc to close.
  */
 export function SubagentDashboard({
   subagents,
+  team,
+  sessionId,
   peers,
   onClose,
   onSelect,
@@ -75,7 +148,8 @@ export function SubagentDashboard({
 }: SubagentDashboardProps): React.ReactNode {
   const panelMode = variant === 'panel'
   React.useEffect(() => { if (visible) onViewed?.() }, [onViewed, visible])
-  const [focusIndex, setFocusIndex] = React.useState(0)
+  // Focus follows the row's key: team mode reorders the rows, and the roster can shrink.
+  const [focus, setFocus] = React.useState<{ readonly index: number; readonly key?: string }>({ index: 0 })
   const scrollRef = React.useRef<ScrollBoxHandle | null>(null)
   const { rows, columns } = useTerminalSize()
 
@@ -85,6 +159,30 @@ export function SubagentDashboard({
   const nestedRows = subagents.filter(isNestedSpawn)
   const flatRows = subagents.filter(row => !isNestedSpawn(row))
   const ordered = nestedRows.length === 0 ? subagents : [...flatRows, ...nestedRows]
+  const model = team === undefined ? undefined : teamDashboardModel(team, subagents, sessionId)
+  const others = new Set(model?.others)
+  const nested = nestedRows.length
+  const rowEntry = (subagent: SubagentState): DashboardEntry =>
+    ({ key: subagent.agentId, subagent, nested: nested > 0 && isNestedSpawn(subagent) })
+  const entries: readonly DashboardEntry[] = model === undefined
+    ? ordered.map(rowEntry)
+    : [
+      ...model.teammates.map(row => ({ key: row.member.id, teamRow: row, nested: false, ...row.subagent === undefined ? {} : { subagent: row.subagent } })),
+      ...ordered.filter(row => others.has(row)).map(rowEntry),
+    ]
+  const othersStart = model === undefined ? -1 : model.teammates.length
+  const focusOf = (state: { readonly index: number; readonly key?: string }): number => {
+    const found = state.key === undefined ? -1 : entries.findIndex(entry => entry.key === state.key)
+    return found >= 0 ? found : Math.min(state.index, Math.max(0, entries.length - 1))
+  }
+  const focusIndex = focusOf(focus)
+  const moveFocus = (delta: number): void => {
+    setFocus((prev) => {
+      const index = Math.max(0, Math.min(entries.length - 1, focusOf(prev) + delta))
+      const key = entries[index]?.key
+      return key === undefined ? { index } : { index, key }
+    })
+  }
 
   useInput((input, key, event) => {
     if (panelMode) return
@@ -96,21 +194,21 @@ export function SubagentDashboard({
     
     if (key.upArrow) {
       event.stopImmediatePropagation()
-      setFocusIndex(i => Math.max(0, i - 1))
+      moveFocus(-1)
       scrollRef.current?.scrollBy(-3)
       return
     }
     
     if (key.downArrow) {
       event.stopImmediatePropagation()
-      setFocusIndex(i => Math.min(ordered.length - 1, i + 1))
+      moveFocus(1)
       scrollRef.current?.scrollBy(3)
       return
     }
 
     if (isPlainReturnInput(input, key) && onSelect) {
       event.stopImmediatePropagation()
-      const selected = ordered[focusIndex]
+      const selected = entries[focusIndex]?.subagent
       if (selected) onSelect(selected.agentId)
       return
     }
@@ -118,7 +216,7 @@ export function SubagentDashboard({
     // v = 主屏查看（Enter 仍是详情）。
     if (input.toLowerCase() === 'v' && onOpenView) {
       event.stopImmediatePropagation()
-      const selected = ordered[focusIndex]
+      const selected = entries[focusIndex]?.subagent
       if (selected) onOpenView(selected.agentId)
       return
     }
@@ -132,25 +230,25 @@ export function SubagentDashboard({
     if (key.escape === true || (key.ctrl === true && input === 'c')) return false
 
     if (key.upArrow === true) {
-      setFocusIndex(i => Math.max(0, i - 1))
+      moveFocus(-1)
       scrollRef.current?.scrollBy(-3)
       return true
     }
 
     if (key.downArrow === true) {
-      setFocusIndex(i => Math.min(ordered.length - 1, i + 1))
+      moveFocus(1)
       scrollRef.current?.scrollBy(3)
       return true
     }
 
     if (isPanelPlainReturn(input, key)) {
-      const selected = ordered[focusIndex]
+      const selected = entries[focusIndex]?.subagent
       if (selected !== undefined) onSelect?.(selected.agentId)
       return true
     }
 
     if (input.toLowerCase() === 'v' && onOpenView !== undefined) {
-      const selected = ordered[focusIndex]
+      const selected = entries[focusIndex]?.subagent
       if (selected !== undefined) onOpenView(selected.agentId)
       return true
     }
@@ -162,7 +260,9 @@ export function SubagentDashboard({
   const running = subagents.filter(s => s.status === 'running').length
   const completed = subagents.filter(s => s.status === 'completed').length
   const failed = subagents.filter(s => s.status === 'failed').length
-  const nested = nestedRows.length
+  const memberCount = (status: TeamMemberRow['status']): number =>
+    model?.teammates.filter(row => row.status === status).length ?? 0
+  const teamSep = panelMode ? ' · ' : '   '
 
   // Full-screen keeps its inset; the panel uses one cell on each side.
   const outer = panelMode
@@ -171,9 +271,39 @@ export function SubagentDashboard({
 
   return (
     <Box flexDirection="column" {...outer}>
-      {!panelMode && <Divider color="accent" title={t('subagent-dashboard-title')} />}
+      {!panelMode && <Divider color="accent" title={t(team === undefined ? 'subagent-dashboard-title' : 'team-dashboard-title')} />}
 
       <Box flexDirection="row" gap={3} marginTop={panelMode ? 0 : 1} marginBottom={panelMode ? 0 : 1}>
+        {team !== undefined ? (
+          // One line that truncates: a narrow panel drops the tail, not the layout.
+          <Box flexShrink={1} overflow="hidden">
+            <Text wrap="truncate-end">
+              <Text color="accent">{memberCount('running')}</Text>
+              <Text dimColor>{' ' + t('team-status-running') + teamSep}</Text>
+              <Text color="accent">{memberCount('idle')}</Text>
+              <Text dimColor>{' ' + t('team-status-idle') + teamSep}</Text>
+              {memberCount('provisioning') > 0 && (
+                <>
+                  <Text dimColor>{memberCount('provisioning')}</Text>
+                  <Text dimColor>{' ' + t('team-status-provisioning') + teamSep}</Text>
+                </>
+              )}
+              {memberCount('active') > 0 && (
+                <>
+                  <Text color="accent">{memberCount('active')}</Text>
+                  <Text dimColor>{' ' + t('team-status-active') + teamSep}</Text>
+                </>
+              )}
+              {memberCount('failed') > 0 && (
+                <>
+                  <Text color="error">{memberCount('failed')}</Text>
+                  <Text dimColor>{' ' + t('team-status-failed') + teamSep}</Text>
+                </>
+              )}
+              <Text dimColor>{t('team-tasks-count', teamTaskProgress(team.tasks))}</Text>
+            </Text>
+          </Box>
+        ) : (<>
         <Text>
           <Text color="accent">{running}</Text>
           <Text dimColor> {t('subagent-count-running')}</Text>
@@ -194,52 +324,78 @@ export function SubagentDashboard({
             <Text dimColor> {t('subagent-count-nested')}</Text>
           </Text>
         )}
+        </>)}
         <Box flexGrow={1} />
         {/* 可点击退出（Esc 的鼠标等价），hover 提亮。侧栏形态没有退出目标：
             ✕ 关不掉右栏（那是宿主的事），渲染出来就是死控件。 */}
         {!panelMode && onClose !== undefined && <ExitButton onClick={onClose} />}
       </Box>
 
+      {team?.failure !== undefined && (
+        <Text color="error" wrap="wrap">{'⚠ ' + t('team-failure', { failure: team.failure })}</Text>
+      )}
+
       <Box flexDirection="column" maxHeight={panelMode ? Math.max(6, rows - 4) : Math.max(10, rows - 10)} marginTop={panelMode ? 0 : 1}>
         <ScrollBox ref={scrollRef} flexDirection="column" flexGrow={1}>
-          {subagents.length === 0 ? (
+          {model !== undefined && (
+            <>
+              <Text dimColor>{t('team-members-title')}</Text>
+              <Text dimColor wrap="truncate-end">{'  ◆ ' + t(model.viewedFromLead ? 'team-lead-row' : 'team-lead-row-peer')}</Text>
+            </>
+          )}
+          {model === undefined && subagents.length === 0 ? (
             <Box flexDirection="column" alignItems="center" marginTop={Math.max(2, Math.floor((rows - 16) / 3))}>
               <Text dimColor>{'○'}</Text>
               <Text dimColor>{t('subagent-none')}</Text>
               <Box marginTop={1}><Text dimColor>{t('subagent-empty-hint')}</Text></Box>
             </Box>
           ) : (
-            ordered.map((subagent, index) => (
-              <Box key={subagent.agentId} flexDirection="column">
-                {nested > 0 && isNestedSpawn(subagent) && (
+            entries.map(({ key, subagent, teamRow, nested: nestedMark }, index) => (
+              <Box key={key} flexDirection="column">
+                {index === othersStart && <Text dimColor>{t('team-others-title')}</Text>}
+                {nestedMark && (
                   <Text dimColor>{'  ↳ ' + t('subagent-nested-mark')}</Text>
                 )}
-                <SubagentCard
-                  subagent={subagent}
-                  variant={panelMode ? 'panel' : 'default'}
-                  focused={index === focusIndex}
-                  onClick={onSelect !== undefined
-                    // Click = view detail, same as Enter on the focused card.
-                    ? () => onSelect(subagent.agentId)
-                    : undefined}
-                />
-                {messages !== undefined && messages.length > 0 && (
+                {subagent === undefined ? (
+                  teamRow !== undefined && <TeamRosterOnlyRow row={teamRow} focused={index === focusIndex} panelMode={panelMode} self={teamRow.member.id === sessionId} />
+                ) : (
+                  <SubagentCard
+                    subagent={subagent}
+                    variant={panelMode ? 'panel' : 'default'}
+                    focused={index === focusIndex}
+                    onClick={onSelect !== undefined
+                      // Click = view detail, same as Enter on the focused card.
+                      ? () => onSelect(subagent.agentId)
+                      : undefined}
+                    {...teamRow === undefined ? {} : { teamMember: { name: teamRow.member.name, status: teamRow.status } }}
+                  />
+                )}
+                {teamRow?.status === 'failed' && teamRow.member.error !== undefined && (
+                  <Text color="error" wrap="truncate-end">{'  │ ' + teamRow.member.error}</Text>
+                )}
+                {/* The member stays idle (a message wakes it), but its last turn failed:
+                    show it, or the agents badge would point at nothing red. */}
+                {teamRow?.status === 'idle' && subagent?.status === 'failed' && (
+                  <Text color="error" wrap="truncate-end">{'  │ ' + t('team-last-run-failed', { error: subagent.error ?? '' }).trimEnd()}</Text>
+                )}
+                {subagent !== undefined && messages !== undefined && messages.length > 0 && (
                   <AgentMessagesSummary
                     messages={messages.filter(message => message.from === subagent.agentId || message.to === subagent.agentId)}
                     selfAgentId={subagent.agentId}
                   />
                 )}
-                {onOpenView !== undefined && (!panelMode || index === focusIndex) && (
+                {subagent !== undefined && onOpenView !== undefined && (!panelMode || index === focusIndex) && (
                   <Box paddingLeft={1} onClick={() => onOpenView(subagent.agentId)}>
                     <Text color="subtle">{`⤢ ${t('agent-view-open-action')}`}</Text>
                   </Box>
                 )}
-                {!panelMode && index < ordered.length - 1 && (
+                {!panelMode && index < entries.length - 1 && index + 1 !== othersStart && (
                   <Text dimColor>{'─'.repeat(Math.max(20, Math.min(72, columns - 6)))}</Text>
                 )}
               </Box>
             ))
           )}
+          {team !== undefined && <TeamTaskBoard tasks={team.tasks} />}
         </ScrollBox>
       </Box>
 

@@ -329,7 +329,10 @@ try {
   check('backend choice: case and blanks normalize', normalizeBackendChoice(' Claude ') === 'claude' && normalizeBackendChoice('DSH') === 'dsh')
   check('backend choice: empty or unknown → default', normalizeBackendChoice('') === undefined && normalizeBackendChoice('gpt') === undefined && normalizeBackendChoice(undefined) === undefined)
   const parse = (backend: unknown): unknown => (Config as unknown as (value: unknown) => { backend?: unknown })({ backend }).backend
-  check('Config accepts a stray DSH_TUI_BACKEND value without failing the boot', parse('Claude') === 'claude' && parse('') === undefined && parse('nonsense') === undefined && parse(undefined) === undefined)
+  // R2 split: the Config schema keeps the syntax half, so a well-formed id
+  // survives for a bundle that assembles during `apply` to claim; malformed
+  // spellings are still dropped here and membership is the boot's call.
+  check('Config accepts a stray DSH_TUI_BACKEND value without failing the boot, and defers membership to the boot', parse('Claude') === 'claude' && parse('') === undefined && parse('nonsense') === 'nonsense' && parse('has:colon') === undefined && parse(undefined) === undefined)
 }
 
 // ── prompts park in the stores Chat renders, per binding ──────────────

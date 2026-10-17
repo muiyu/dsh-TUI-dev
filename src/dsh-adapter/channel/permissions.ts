@@ -1,4 +1,5 @@
 import { t } from '../../i18n.js'
+import { PERMISSION_PRESET_AUTO } from '../../permissionPresetLabels.js'
 import { type SessionModeSpec } from '../../sessionModes.js'
 import { cleanRenderText } from '../sanitize.js'
 import type { PermissionPresetOption, PermissionPresetService, PermissionPresetSnapshot } from './types.js'
@@ -108,7 +109,9 @@ export function permissionBundlesFromService(service: unknown): readonly Permiss
   const names: readonly unknown[] = Array.isArray(runtime.names) ? runtime.names : []
   const bundles: PermissionPresetBundle[] = []
   for (const name of names) {
-    if (typeof name !== 'string') continue
+    // The session-only `auto` preset never stands in for a static mode's
+    // atoms: canonicalizing into it would skip its risk confirmation.
+    if (typeof name !== 'string' || name === PERMISSION_PRESET_AUTO) continue
     try {
       // The registry resolves atoms on instance state; never detach `resolve`.
       const spec = runtime.resolve(name)

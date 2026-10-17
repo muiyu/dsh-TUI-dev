@@ -278,17 +278,18 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
 ## 接入新后端
 
 `Backend` 是 `tui.dsh/v1alpha1` 的第三个贡献族（继设置区块、全屏场景之后），当前状态是
-**`alpha`、不承诺**：类型面、definition、contract profile、conformance 与**准入链路**
-（清单 → registry → descriptor，W-2 已接线）都可用；还没做的是把已挂载 bundle 的声明读进
-`registerBackend()` / picker 的那一步，它随 Stage C 的装链路落地。接入一个后端 = 按公开
-面写一份声明 + 实现 `AgentBackend` 与 `AgentSession`；**协议不依赖任何单个后端的特殊性**：
+**`alpha`、不承诺**：类型面、definition、contract profile、conformance、**准入链路**
+（清单 → registry → descriptor，W-2）与**装配链路**（装 → 重启 → 进 kernel picker，D-1）
+都已接线。接入一个后端 = 按公开面写一份声明 + 实现 `AgentBackend` 与 `AgentSession`；
+**协议不依赖任何单个后端的特殊性**：
 claude（SDK peer + 安装向导）与 codex（系统 CLI + 进程池）必须都能用同一份声明面表达，
 两者的差异只落在 `install?`、`unloadExport?` 这类字段上——conformance 的两个正例
 （`valid-backend-contribution.json` 与 `valid-backend-contribution-cli.json`）与常驻假后端
 夹具钉的就是这条。仓内的 `manifest.ts` 是这份声明的
 **超集**，私有项不投影出去。完整口径见
 [tui-profile 说明 0009](../tui-profile/notes/0009-backend-contribution.md)，其中
-「Public surface（α）」一节是**承诺 / 不承诺清单**（导出面只增不删、破坏性变更怎么被发现）。
+「Public surface（α）」一节是**承诺 / 不承诺清单**（导出面只增不删、破坏性变更怎么被发现），
+「Assembled (D-1)」一节是第三方 bundle 被装配进 picker 的逐条规则。
 
 1. 写 `src/backends/<id>/manifest.ts`——它投影出的**公开声明**（`tui.dsh/v1alpha1#Backend`）
    字段是 `id`、`label`（**只收字面量**，宿主 i18n 键进不来）、`shortLabel`、`product?`、`capabilities`、`grants`、`install?`、
@@ -357,6 +358,31 @@ claude（SDK peer + 安装向导）与 codex（系统 CLI + 进程池）必须�
     这条形态与 SDK peer 形态（claude）由 conformance 的两个正例对照钉住（见上），宿主侧
     由 `scripts/fixtures/probe-backend/` 的两种安装面夹具与
     `scripts/verify-backend-contribution.ts` 的执行体覆盖。
+
+### 第三方后端 bundle（不在本仓的作者）
+
+上面 1–12 条讲的是**仓内**后端（目录进 `src/backends/`、由构建期索引收进注册表）。本仓之外的
+作者走的是**装链路**，形态不同、要求更少：
+
+1. 包根一份 `dsh-plugin.json`，`contributes['x-dsh-tui']` 里放一个 `kind: 'Backend'` 条目
+   （形状同上第 1 条），`name` 是这个贡献的本地名。
+2. `package.json` 声明 `dsh.bundle`（哪怕没有要 patch 的行）——否则它只会作为普通依赖装进
+   profile，不会成为一层，也就不会被装配。
+3. 包入口导出 handler：**默认导出名就是 `backend`**（`backendExport` 是 in-tree 私有项，声明里
+   命名不了别的导出），`spec.unloadExport` 从同一个模块命名空间取。每个 bundle 只声明一个
+   后端；多个声明会被拒绝，handler 的 `id` 也必须与 `spec.id` 一致，不能借用其他后端的数据目录。
+4. 启动时宿主扫 profile 的 `dsh.profile.bundles`，按 Loader 自己的 resolver 解析入口、从**最近的
+   包根**读清单，校验 + 准入后注册；**模块只在真的选中该后端时才 import**。所以声明要过
+   `validateBackendSpec()`（未知字段一律拒），保留 id（`dsh`/`claude`/`codex`）在准入处被拒。
+5. 承诺是**装 → 重启 → 出现在 picker 里**；装了不重启不算。判不了的清单/入口不会静默消失——
+   宿主给一行归属到该 bundle 的告警，其余 bundle 照常装配。
+   清单须过规范投影（含贡献身份唯一性）；等待授权的条目只注册身份，不参与探测，也不能显式启动。
+
+可照抄的实例：[`scripts/fixtures/third-party-backend/`](../scripts/fixtures/third-party-backend/README.md)
+（按公开面写的 bundle：声明 + 实现 + 池钩子，不发布），执行体是
+`scripts/verify-backend-assembly.ts`（把它装进一次性 profile 跑完整装配链）。上面 1–12 条里与
+装配无关的事项——`AgentBackend`/`AgentSession` 的实现、翻译器、能力声明、文案、恢复语义——
+对包外作者同样成立，只是执法者是**你自己**的仓库（孤岛规则那类宿主侧门禁只覆盖仓内后端）。
 
 ## 验证
 

@@ -370,6 +370,7 @@ export function createCoreChannel(
   // and never holding a non-DSH session's id): `read` is a cached lookup, so
   // the accessor on the state below stays cheap.
   const contextPressure = options.contextPressure
+  const team = options.team
 
   /**
    * The subagent control for `session`: interrupt always; the transcript read
@@ -484,6 +485,10 @@ export function createCoreChannel(
      */
     get contextBreakdown() {
       return resolveContextBreakdown(contextPressure?.readBreakdown?.(state.sessionId))
+    },
+    /** The bound session's Agent Team, a cached read of the team source. */
+    get team() {
+      return team?.teamOf(state.sessionId)
     },
     commandList: localCommandsFor(initialCapabilities.commands),
     backendCapabilities: initialCapabilities,
@@ -750,6 +755,12 @@ export function createCoreChannel(
   // another session's value.
   if (contextPressure !== undefined) {
     owner.own(contextPressure.subscribe(() => {
+      if (owner.current()) state.emit()
+    }))
+  }
+  // Same for the team roster: the Lead log moves it between this session's events.
+  if (team !== undefined) {
+    owner.own(team.subscribe(() => {
       if (owner.current()) state.emit()
     }))
   }

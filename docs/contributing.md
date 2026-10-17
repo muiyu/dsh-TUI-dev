@@ -326,6 +326,7 @@ CI 回归都要跑。窄改动还要跑最近的聚焦脚本：
 | Claude 后端 | 对应的 `scripts/verify-claude-*`（假 SDK，不花钱）与 `node --import tsx/esm scripts/verify-backend-channel.ts`；`verify:claude-live`/`verify:claude-headless` 调用真实 CLI，只在有意花费时手动跑（钉在 haiku） |
 | 归档语义与后端 OAuth 登出 | `node --import tsx/esm scripts/verify-session-archive.tsx`（真实无头浏览器、假目录），`node --import tsx/esm scripts/verify-backend-logout.ts`（真实 channel/UI facade、假 OAuth host）；不触碰原生登录/真实凭据，DSH/Claude 默认删除语义保持 |
 | Codex 原生后端 | `pnpm verify:codex-contract`、对应 `scripts/verify-codex-*` 的假 app-server/fixture 回归、`node --import tsx/esm scripts/verify-backend-channel.ts`；中立层改动再跑 DSH 黄金投影、Claude 对照与 `verify-agent-event-invariants.ts`。真实 `verify-codex-live.ts` / 探针只经 `codex-cheap-only.mjs` 守卫，真实 ChatGPT 登录/TTY 未跑须单列 |
+| DSH Agent Teams（team-roster、team-tools、团队消息气泡、团队仪表盘、`/team` 开关与按 assembly 取舍的委派工具） | `node --import tsx/esm scripts/verify-agent-teams.ts`、`node --import tsx/esm scripts/verify-agent-teams-compat-0.2.0.ts`（0.2.0 日志兼容）、`node --import tsx/esm scripts/verify-team-message-bubble.tsx`、`node --import tsx/esm scripts/verify-team-dashboard.tsx`、`node --import tsx/esm scripts/verify-team-mode.ts`、`node scripts/verify-bundled-presets.mjs`（先构建） |
 | Channel submit/steer/pending 行为 | `node scripts/verify-submit.mjs` |
 | 回退后编辑重发与历史 Inbox 清理 | `pnpm verify:rewind-edit` |
 | 提示队列行为 | `node scripts/verify-queue.mjs` |
@@ -335,7 +336,7 @@ CI 回归都要跑。窄改动还要跑最近的聚焦脚本：
 | 压缩 × 会话切换生命周期（取消先于 fork 快照、persistence 分类提示） | `node --import tsx/esm scripts/verify-compact-switch.tsx` |
 | 主题加载、持久化与运行时插件接缝 | `node --import tsx/esm scripts/verify-themes.mjs`、`node --import tsx/esm scripts/verify-runtime-themes.ts` |
 | 默认推理强度等偏好链（effortPrefs / settings 默认值） | `node --import tsx/esm scripts/verify-effort-default.ts` |
-| 滚动/粘底行为 | `node scripts/verify-scroll.mjs`、`node scripts/verify-resticky.mjs`、`node --import tsx/esm scripts/verify-post-shrink-anchor.tsx` 及对应 `repro-*` 环境 |
+| 滚动/粘底行为 | `node scripts/verify-scroll.mjs`、`node scripts/verify-resticky.mjs`、`node --import tsx/esm scripts/verify-post-shrink-anchor.tsx`、`node --import tsx/esm scripts/verify-scroll-fold-anchor.tsx`、`node --import tsx/esm scripts/verify-scroll-fold-anchor-mounted.tsx`、`node --import tsx/esm scripts/verify-scroll-anchor-invalidation.tsx`、`node --import tsx/esm scripts/verify-scroll-anchor-remeasurement.tsx`（同时覆盖 `DSH_TEST_COLUMNS=60`）及对应 `repro-*` 环境 |
 | 计划评审长正文（`exit_plan_mode` 窗口化 + 滚轮） | `node --import tsx/esm scripts/verify-plan-review-scroll.tsx` |
 | 全屏复制即选区 | `node scripts/verify-copy-on-select.mjs` |
 | 组件级鼠标拖拽协议（目标捕获、事件冒泡、点击/选区兼容与中断收尾） | `node --import tsx/esm scripts/verify-drag-protocol.tsx` |

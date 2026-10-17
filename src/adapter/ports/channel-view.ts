@@ -106,6 +106,8 @@ export interface ChatRow {
   kind: 'user' | 'assistant' | 'tool' | 'notice' | 'reasoning' | 'interrupt' | 'local' | 'local-output' | 'compact' | 'subagent' | 'job' | 'turn-summary'
   /** Extra label for non-human user rows (e.g. `steering`). */
   label?: string
+  /** `user` rows another agent sent (an Agent Teams peer message): its name. */
+  sender?: string
   /** Interrupt rows: backend name, kept separate from localized transcript text. */
   interruptBackend?: string
   /** Actual execution location for `!command` rows. */
@@ -987,6 +989,9 @@ export interface PermissionPresetSnapshot {
   readonly availability: PermissionPresetAvailability
   readonly options: readonly PermissionPresetOption[]
   readonly current?: PermissionPresetCurrent
+  /** The session already selected the experimental `auto` preset, so its
+   *  session-scoped risk confirmation is spent (the Shift+Tab rule). */
+  readonly autoConfirmed?: boolean
 }
 
 export type PermissionPresetAvailability = 'runtime' | 'legacy' | 'unavailable'
@@ -1294,4 +1299,49 @@ export interface ContextBreakdown {
   /** Heuristic tokens of every other visible surface node (superseded system
    *  prompts and injected context included). */
   readonly messageTokens: number
+}
+
+/** One durable roster row of an Agent Team. */
+export interface TeamMember {
+  /** The member's session id (the Lead's is the team id). */
+  readonly id: string
+  /** Permanent model-facing name; the Lead is always `lead`. */
+  readonly name: string
+  readonly role: 'lead' | 'teammate'
+  /** Durable lifecycle only; whether a turn is running comes from the
+   *  member's own session (the subagent row for a teammate). */
+  readonly phase: 'provisioning' | 'active' | 'failed'
+  readonly error?: string
+}
+
+/** One non-deleted shared task of an Agent Team. */
+export interface TeamTask {
+  readonly id: string
+  readonly revision: number
+  readonly subject: string
+  readonly description: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+  readonly blockedBy: readonly string[]
+  readonly writeScopes: readonly string[]
+  readonly ownerName?: string
+  /** Every blocker is complete, so the task can be claimed. */
+  readonly ready: boolean
+  /** Advisory overlaps with in-progress tasks' write scopes. */
+  readonly writeScopeWarnings: readonly string[]
+}
+
+/**
+ * The Agent Team rooted at the Lead session of the session on screen, as its
+ * backend publishes it. Present only when there is a team to show: at least
+ * one teammate, a task, or a projection failure — a session's implicit
+ * one-member team (just the Lead) reads as none.
+ */
+export interface TeamView {
+  /** The Lead session id; differs from the bound session inside a teammate. */
+  readonly leadSessionId: string
+  readonly members: readonly TeamMember[]
+  readonly tasks: readonly TeamTask[]
+  /** The first rejected persisted record; members and tasks are then the
+   *  last valid state. */
+  readonly failure?: string
 }

@@ -33,6 +33,7 @@ function projectRow(row: ChatRow): HostChannelRowProjection {
     kind: row.kind,
     text: row.text,
     ...(row.label === undefined ? {} : { label: row.label }),
+    ...(row.sender === undefined ? {} : { sender: row.sender }),
     ...(row.streaming === undefined ? {} : { streaming: row.streaming }),
     ...(row.time === undefined ? {} : { time: row.time }),
     ...(row.seq === undefined ? {} : { seq: row.seq }),

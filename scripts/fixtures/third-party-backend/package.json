@@ -1,0 +1,16 @@
+{
+  "name": "@dsh-tui-fixtures/echo-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "D-5 dogfood: a third-party backend bundle written against the published surface only. Never published; driven by scripts/verify-backend-assembly.ts.",
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "exports": {
+    ".": "./backend.js"
+  }
+}

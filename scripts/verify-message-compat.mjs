@@ -16,6 +16,7 @@ const { createChannel } = await import('../lib/types/dsh-adapter/channel.js')
 const { SubagentActivityStore } = await import('../lib/types/dsh-adapter/subagents.js')
 const { extractEntries } = await import('../lib/types/dsh-adapter/sessionTree.js')
 const { harnessToolResultView, toolErrorText } = await import('../lib/types/dsh-adapter/channel/transcript.js')
+const { t } = await import('../lib/types/i18n.js')
 
 function result(api, callId, text, isError = false) {
   const content = [{ type: 'text', text }]
@@ -124,6 +125,29 @@ try {
     const todos = harnessToolResultView('todo', { message: result(api, 't', '{"todos":[{"content":"Verify","status":"in_progress"}]}') })
     assert.match(todos.content[1].text, /Verify/)
     assert.equal(toolErrorText({ data: { message: result(api, 'e', 'explanation', true) } }), 'explanation')
+    const denied = { name: 'AutoReviewDeniedError', code: 'AUTO_REVIEW_DENIED' }
+    const deniedDetail = 'Error: Auto review rejected tool "bash"; its body was not executed'
+    assert.equal(
+      toolErrorText({ data: { message: result(api, 'r', deniedDetail, true), error: { ...denied, reason: 'deletes outside the workspace' } } }),
+      `${t('tool-error-auto-review-denied')} — deletes outside the workspace`,
+    )
+    assert.equal(
+      toolErrorText({ data: { message: result(api, 'r', deniedDetail, true), error: denied } }),
+      t('tool-error-auto-review-denied'),
+      'a reason-less denial never appends its English detail',
+    )
+    assert.equal(
+      toolErrorText({ data: { message: result(api, 'r', 'detail', true), error: { name: 'ToolError', code: 'DENIED', reason: 'why' } } }),
+      'ToolError: DENIED — detail',
+    )
+    {
+      const subagents = new SubagentActivityStore()
+      subagents.onSpawned('denied-child')
+      subagents.onSessionEvent('denied-child', { type: 'tool/call', data: { callId: 'r', name: 'bash', arguments: '{}' } })
+      subagents.onSessionEvent('denied-child', { type: 'tool/result', data: { message: result(api, 'r', deniedDetail, true), error: { ...denied, reason: 'risky' } } })
+      const call = subagents.get('denied-child').toolCalls[0]
+      assert.equal(call.error, `${t('tool-error-auto-review-denied')} — risky`, 'a structured failure never renders as [object Object]')
+    }
   }
   console.log('PASS: V3/V4 messages in live/replay/folded projections, export, subagents and compact checkpoints')
 } finally { rmSync(home, { recursive: true, force: true }) }

@@ -26,6 +26,8 @@ import { harnessToolResultView, prepareReplayEvents, toolErrorText } from '../ch
 import type { ToolCallView, ToolResultView, ToolsRegistryLike } from '../channel/types.js'
 import { isCompactionCheckpointSource, toolResultPayload } from '../compat/messages.js'
 import { transcriptImagesOf } from '../transcript-images.js'
+import { isTeamToolName, TEAM_SPAWN_TOOL, teamMessageOf, teamToolCallView, teamToolResultView } from '../team-tools.js'
+import { teamMailboxAsRelay, withoutTeammateReminder } from '../compat/agent-team-0.2.0.js'
 
 export interface DshTranslatorDeps {
   /** The host-plane tools registry (dsh-tools); absent in bare embedders,
@@ -220,6 +222,8 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
   /** Frame revisions are monotone within one attached Agent lifecycle; a
    *  re-delivered or out-of-order frame is dropped here. */
   let lastStreamRevision = -1
+  /** Whether this session's first human prompt has been translated. */
+  let promptSeen = false
   /**
    * Open calls by callId until their result: what the result's presenter,
    * images and task feeds need. `card: false` = question-presented (the
@@ -228,6 +232,30 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
    * projector's own card index: deleted on result, cleared on reset.
    */
   const openCalls = new Map<string, { readonly name: string; readonly args: string; readonly card: boolean }>()
+  /**
+   * `spawn_teammate` calls that have not written their member yet. The team
+   * refuses a teammate (name taken or invalid, member limit, not the Lead,
+   * service disposing, cancelled) before it appends `team/member`: no roster
+   * row carries that error, so a failed result brings back the plain card.
+   * Once the member is written its failure shows on the roster, and the call
+   * leaves this map. Bounded like `openCalls`.
+   */
+  const unwrittenSpawns = new Map<string, Omit<AgentEventOf<'tool.call'>, 'presentation'>>()
+
+  /** A `team/member` write settles the pending spawn of that name. Two
+   *  parallel spawns of one name cannot be told apart; the first one goes. */
+  const onTeamMember = (data: unknown): void => {
+    const name = (data as { member?: { name?: unknown } } | undefined)?.member?.name
+    if (typeof name !== 'string') return
+    for (const [callId, call] of unwrittenSpawns) {
+      let args: unknown
+      try { args = JSON.parse(call.argsJson) } catch { continue }
+      if ((args as { name?: unknown } | null)?.name === name) {
+        unwrittenSpawns.delete(callId)
+        return
+      }
+    }
+  }
 
   /** Ask the producing tool how its call should render (diff/terminal/…).
    *  Unknown tool, unparseable args, or a throwing presenter all degrade to
@@ -235,7 +263,7 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
   const presentCallView = (name: string, rawArgs: string): ToolCallView | undefined => {
     try {
       const tool = deps.tools()?.get(name, deps.scope())
-      if (tool?.presentCall === undefined) return undefined
+      if (tool?.presentCall === undefined) return teamToolCallView(name, rawArgs)
       return tool.presentCall(JSON.parse(rawArgs)) as ToolCallView | undefined
     } catch {
       return undefined
@@ -252,7 +280,12 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
       const local = harnessToolResultView(name, data)
       if (local !== undefined) return local
       const tool = deps.tools()?.get(name, deps.scope())
-      if (tool?.presentResult === undefined) return undefined
+      if (tool?.presentResult === undefined) {
+        // Only the team tools read the text: skip joining every other result.
+        if (!isTeamToolName(name)) return undefined
+        const text = toolResultPayload(data.message).content.map(item => (item.type === 'text' ? item.text : '')).join('').trim()
+        return teamToolResultView(name, rawArgs, text)
+      }
       return tool.presentResult(JSON.parse(rawArgs), {
         ...toolResultPayload(data.message),
         ...(data.meta !== undefined ? { meta: data.meta } : {}),
@@ -263,7 +296,8 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
   }
 
   const translateUserMessage = (event: SessionEvent<'user/message'>): readonly AgentEvent[] => {
-    const data = event.data
+    // compat(dsh 0.2.0, log): a 0.2.0 mailbox delivery reads as the relay it became.
+    const data = teamMailboxAsRelay(event.data)
     const base = { id: data.id, anchor: String(event.seq), seq: event.seq, time: event.time, blocks: data.content }
     // Both legacy and V4 checkpoints render as a folded summary rather than
     // disappearing with the other injected context.
@@ -287,15 +321,24 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
     if ((data.source as { kind: string }).kind === 'model-selection') {
       return [{ type: 'notice', level: 'info', text: textOf(data.content) }]
     }
+    // An Agent Teams peer message: a bubble labelled with its sender.
+    const team = teamMessageOf(data.source, data.content)
+    if (team !== undefined) {
+      return [{ type: 'user.message', ...base, blocks: team.blocks, source: 'team-message', sender: team.sender, text: team.text }]
+    }
     // Injected context (plugin/skill source) is model-facing only; it has no
     // transcript-facing text.
     if (data.source.kind !== 'user') return [{ type: 'user.message', ...base, source: 'injected', text: '' }]
+    // compat(dsh 0.2.0, log): a 0.2.0 teammate's first prompt drops its identity block.
+    const content = promptSeen ? data.content : withoutTeammateReminder(data).content
+    promptSeen = true
     return [{
       type: 'user.message',
       ...base,
+      blocks: content,
       source: 'user',
-      text: firstTextOf(data.content),
-      images: transcriptImagesOf(data.content, deps.attachments),
+      text: firstTextOf(content),
+      images: transcriptImagesOf(content, deps.attachments),
     }]
   }
 
@@ -304,6 +347,8 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
     const callId = data.message.source.callId
     const call = openCalls.get(callId)
     openCalls.delete(callId)
+    const spawn = unwrittenSpawns.get(callId)
+    unwrittenSpawns.delete(callId)
     const payload = toolResultPayload(data.message)
     const isError = data.error !== undefined || payload.isError
     // Text/presentation/images are derived only for results something
@@ -320,11 +365,12 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
       time: event.time,
       content: payload.content,
       text,
-      ...(isError && call !== undefined ? { errorText: toolErrorText(event) } : {}),
+      ...(isError && (call !== undefined || spawn !== undefined) ? { errorText: toolErrorText(event) } : {}),
       ...(card === undefined ? {} : { images: transcriptImagesOf(data.message.content, deps.attachments) }),
       ...(data.meta === undefined ? {} : { meta: data.meta }),
       ...(card === undefined || isError ? {} : { presentation: presentResultView(card.name, card.args, data) as ToolResultPresentation | undefined }),
     }
+    if (spawn !== undefined && isError) return [{ ...spawn, presentation: presentCallView(spawn.name, spawn.argsJson) as ToolCallPresentation | undefined }, result]
     if (card === undefined || isError) return [result]
     const events: AgentEvent[] = [result]
     // A job_output read doubles as the job card's output feed (the
@@ -393,7 +439,10 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
           return [{ ...base, presentation: QUESTION }]
         }
         // The delegation tools render as the live subagent card.
-        if (isSubagentToolName(data.name)) return [{ ...base, presentation: SUBAGENT }]
+        if (isSubagentToolName(data.name)) {
+          if (data.name === TEAM_SPAWN_TOOL) unwrittenSpawns.set(callId, base)
+          return [{ ...base, presentation: SUBAGENT }]
+        }
         openCalls.set(callId, { name: data.name, args: data.arguments, card: true })
         return [{ ...base, presentation: presentCallView(data.name, data.arguments) as ToolCallPresentation | undefined }]
       }
@@ -438,6 +487,7 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
         break
     }
     const data = (event as { data?: unknown }).data
+    if (type === 'team/member') onTeamMember(data)
     switch (type) {
       case 'assistant/chunk': {
         // Pre-0.1.5 live streams and raw pre-V3 logs carry per-token chunks
@@ -518,6 +568,7 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
    */
   const translateReplay = (events: readonly SessionEvent[]): readonly AgentEvent[] => {
     lastStreamRevision = -1
+    promptSeen = false
     const out: AgentEvent[] = []
     for (const event of prepareReplayEvents(events)) {
       for (const translated of translateEvent(event)) out.push(translated)
@@ -528,7 +579,9 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
   /** Forget the frame fence and every open call (paired with a projector reset). */
   const reset = (): void => {
     lastStreamRevision = -1
+    promptSeen = false
     openCalls.clear()
+    unwrittenSpawns.clear()
   }
 
   return { translateEvent, translateFrame, translateReplay, reset, presentCallView, presentResultView }

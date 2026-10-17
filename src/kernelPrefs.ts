@@ -155,7 +155,7 @@ export const HOST_NOTICE_ENV = 'DSH_TUI_HOST_NOTICE'
 export function resolveRememberedBackend(input: {
   /** KERNEL_SWITCH_HANDOFF_ENV, normalized; undefined on ordinary launches. */
   readonly handoff?: KernelBackendId | undefined
-  /** Config.backend (normalized by the schema). */
+  /** Config.backend after the boot's post-discovery membership check. */
   readonly configured?: KernelBackendId | undefined
   /** process.env.DSH_TUI_BACKEND as given. */
   readonly envRaw?: string | undefined

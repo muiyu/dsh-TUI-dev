@@ -38,6 +38,9 @@
 另：
 
 - `@deepseek-harness-tui/dsh-tui/api`（纯类型入口）为实验性公开面。
+- **preset 内的行（实验性，接缝七）**：bundle 用 `@deepseek-harness-tui/dsh-tui/preset-patch`
+  行改 dsh-TUI 注册的 preset 里某一行的 `config`（例如关掉 `standard` 的
+  `compaction-basic` 自动压缩），写法见[准入与开发指南](../tui-profile/docs/plugin-admission-and-development.md)接缝七。
 - **侧栏 Panel（实验性，§18）**：`ctx.tuiPanels.register({ apiVersion: 1,
   id, title, icon?, component | compact })` 向右侧栏注册面板（宿主自动加
   `<pluginId>:` 前缀；每插件 ≤4 个、全局 ≤32 个；`open()` 限速每 5s 一次；
@@ -50,9 +53,40 @@
   `ctx.tuiPluginHost.grants.corrupt` 已随 adapter 分层重构（#705）移除。
 - **后端贡献族（`tui.dsh/v1alpha1` `Backend`，接缝十四）的公开面已随第一版 apiVersion 冻结**：类型面
   （`BackendSpec`、`validateBackendSpec`、`backendAdmission`）与 conformance
-  （`TUI-BACKEND-001`）已可用，**准入链路（清单 → registry → descriptor）已接线**；
-  仍未做的是把已挂载 bundle 的声明接进注册表与 kernel picker（装链路），所以
-  「装一个第三方后端、重启后出现在 picker 里」这条端到端流程尚未成立。
+  （`TUI-BACKEND-001`）已可用，**准入链路（清单 → registry → descriptor）与装链路都已接线**：
+  启动时扫 profile 声明的已装 bundle（`dsh.profile.bundles`——`/plugin install` 与 `dsh plugin add`
+  都写它），按**实际 ESM 入口最近的包根**读 `dsh-plugin.json`，校验 + 准入后注册，于是
+  「装一个第三方后端、重启后出现在 picker 里」成立。三条边界：这份扫描**早于**后端选择的注册表成员判定
+  （Config Schema 只校验语法，独立入口的完整/轻量组合由装配后的最终内核决定）；后端实现从包入口模块的 `backend` 导出取
+  （`backendExport` 是 in-tree 私有项，声明里写不了别的导出名），模块只在真的选中时才 import；
+  装完**不重启**仍然不会出现在 picker 里——那不是承诺。
+  当前每个 bundle 只接一个 `Backend` 声明；清单须通过规范投影（含贡献身份唯一性），handler 的 id 必须与声明一致。
+  等待授权的条目仍注册身份，但不探测、不加载；启动参数或配置显式指定它也会报错。
+- **装包本身已在终端里可用（C-4）**：`/plugin install <spec>` 走宿主
+  `ctx.pluginManager`，装前给提醒、按来源决定要不要确认信任（嫡系判据是随包发布的
+  `tui-profile/feed/first-party.json`，离线可判；验不过一律 fail closed 退回确认），
+  `esc` 收起面板；安装进行中会尝试取消，面板等写操作结束后才关闭。取消成功由服务回滚 profile，
+  已进入应用阶段而来不及时则等待安装完成。构建脚本被拦时在面板里批准，
+  版本不兼容可登记 **精确版本豁免**；登记期间取消会等待当前写入、停止后续登记和重试，
+  已写入的豁免保留。**已知缺口**：provenance 只留了「一票否决」的缝、
+  没有任何在线校验（宿主服务不暴露这类 API）；服务缺席时由转录给出 CLI 命令与原因
+  （不弹面板：没有可驱动的流程），**不在 TUI 内代跑 `dsh plugin`**。
+- **生命周期动作已在终端里可用（C-5）**：`/plugin remove <bundle>`、`/plugin enable
+  <名称|id>`、`/plugin disable <名称|id>` 走同一套宿主服务。**bundle 与行是两级语义**：
+  bundle 是组合层（写 profile 清单的 `dsh.profile.bundles`），行是 patch 的 `disabled`；
+  解析顺序是 bundle 名精确匹配优先，其次 `entryId` → `patchId` → 模块名，都不中就给可寻址
+  清单、不猜；模块名匹配多行时，列出行 ID 并拒绝写入，须改用具体 ID。**门禁 2**（不能自己杀自己）在 TUI 侧硬拒三类目标——提供本应用的 bundle、
+  宿主层 `@deepseek-ai/dsh-base`、本应用自己的行（加载本包模块的行，**或由本包 patch
+  插入的行**：实测本包的 patch 插入 17 行，其中 8 行加载的是首方 `@deepseek-ai/*` 模块，
+  上游只锁住其中一个）——拒绝时给一行原因且**不发起任何服务调用**，与 HMR 是否生效无关（上游 `stop-profile` 守卫只在没有 HMR 时生效，本 profile 是
+  `patchReload: live`，所以那道守卫靠不住）。`enable` 不因门禁 2 被拒：它是复原动作，把手工
+  改坏的 profile 关在门外等于封死唯一的 UI 退路；上游自己的锁（`management-required` /
+  `unaddressable`）则两个方向都拒，并原样转述上游的理由。**任何 `enable` 与 `remove` 都要确认**（卸载列出它会动的行数与覆盖数），
+  `disable` 只对宿主层自己的行问一句（关掉它会卸载本应用注入的服务）。宿主不提供
+  已装包的来源证明，本地或 Git 包也能声明嫡系的名称与版本，因此即使命中 feed 也不能免确认。这些动作**没有取消面**：
+  服务不提供，Esc 只关面板，写入照旧跑完并（在同一会话里）把结果写进转录。**已知缺口**：
+  卸载不删用户数据——`~/.dsh-tui/backends/<id>/`、grants、存储命名空间只**报告一次**，由
+  用户自己决定删不删；包内声明读不到时明说「判断不了」，不制造「已清理」的假象。
 - `grants` 收窄为 `HostGrantFacade`，迁移细节见该 PR。
 - `TuiSceneProps.channel`（`ChannelUi`）上的 `minimal` / `setMinimal()` 已更名为
   `minimalUi` / `setMinimalUi()`；旧名保留为 **deprecated 别名**，读写同一个

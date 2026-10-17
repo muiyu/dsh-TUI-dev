@@ -403,6 +403,96 @@ function guardRootCapabilities(root: Context): void {
   } catch {
     // Fall through when a minimal embedder omits reflection internals.
   }
+
+  admitRootProjectionRegistrations(root)
+}
+
+const projectionRegistryRoots = new WeakSet<object>()
+const guardedProjectionRegistries = new WeakSet<object>()
+
+/**
+ * `sessionProjections.register` hangs its disposer on the receiver's context
+ * (the registry's documented ownership: the calling fiber). DSH's agent-team
+ * service reaches it through `ctx.root`, which lands that effect on the root
+ * fiber and the guard above refuses it. Admit that one call with host
+ * capability, so the registration sits where it would without the guard and
+ * the caller's disposer releases it in the caller's own order; the plugin's
+ * unload releases one it leaves behind ({@link releaseAfterUnload}). The
+ * root stays closed to everything else.
+ */
+function admitRootProjectionRegistrations(root: Context): void {
+  if (projectionRegistryRoots.has(root as object)) return
+  projectionRegistryRoots.add(root as object)
+  const wrap = (): void => withHostRootCapability(() => {
+    let registry: object
+    try {
+      const service = (root as unknown as { sessionProjections?: unknown }).sessionProjections
+      if (typeof service !== 'object' || service === null) return
+      registry = concreteService(service)
+    } catch {
+      return
+    }
+    if (guardedProjectionRegistries.has(registry)) return
+    const original = Reflect.get(registry, 'register')
+    if (typeof original !== 'function') return
+    guardedProjectionRegistries.add(registry)
+    // Configurable: Cordis's traceable proxy rebinds methods, which a frozen
+    // property would forbid. Replacing it only restores the refused path.
+    Object.defineProperty(registry, 'register', {
+      configurable: true,
+      writable: false,
+      value: function (this: unknown, ...args: unknown[]) {
+        // Through `ctx.root` the receiver is a root-derived context on the
+        // root fiber: that is the effect the guard would refuse.
+        if (callContextOf(this)?.fiber !== rootFibers.get(root as object) || !currentActivationIsPlugin(root)) {
+          return Reflect.apply(original, this, args)
+        }
+        const token = activationStorage.getStore() as ActivationToken
+        assertLiveContext(token.context, 'sessionProjections.register')
+        // On the root fiber, as without the guard: the caller orders the
+        // disposer itself (DSH's TeamService unregisters after its async
+        // runtime teardown, which still reads the key). On the caller's fiber
+        // it would be a sibling effect, and Cordis unloads siblings at once.
+        const dispose = withHostRootCapability(() => Reflect.apply(original, this, args)) as () => void
+        return releaseAfterUnload(root, token.fiber, dispose)
+      },
+    })
+  })
+  wrap()
+  try {
+    // The registry may mount after the guard (the profile composes later).
+    withHostRootCapability(() => root.on('internal/service' as never, ((name: unknown) => {
+      if (name === 'sessionProjections') wrap()
+    }) as never, { global: true }))
+  } catch {
+    // A minimal embedder without the event helper keeps the plain guard.
+  }
+}
+
+/**
+ * A root registration a plugin made through {@link admitRootProjectionRegistrations}
+ * still dies with that plugin: if the plugin never disposes it, it goes once
+ * the plugin's fiber has finished unloading (every effect settled, async
+ * teardown included), whether the fiber reloads or not.
+ * @returns the disposer handed to the plugin; calling it also drops the watch.
+ */
+function releaseAfterUnload(root: Context, fiber: object, dispose: () => void): () => void {
+  let unwatch: (() => void) | undefined
+  const release = (): void => {
+    unwatch?.()
+    unwatch = undefined
+    dispose()
+  }
+  try {
+    unwatch = withHostRootCapability(() => root.on('internal/status', (changed, oldState) => {
+      // Cordis uses 5 for UNLOADING (see rememberFiber). The event carries
+      // either the activation's fiber or the wrapper normalized to it.
+      if (oldState === 5 && (changed === fiber || rememberFiber(changed, root) === fiber)) release()
+    }, { global: true }))
+  } catch {
+    // Without the event helper only the plugin's own disposer releases it.
+  }
+  return release
 }
 
 function guardFiberMethod(target: object, method: string, root: Context, capability: string): void {

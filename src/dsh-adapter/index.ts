@@ -11,7 +11,7 @@ import Schema from '@deepseek-ai/schemastery'
 import type { SessionModeSpec } from '../sessionModes.js'
 import type { NotificationMethod, TaskNotifications } from '../ink/terminal-notification.js'
 import { parseBackendChoice } from './backend-registry.js'
-import type { KernelBackendId } from '../kernelPrefs.js'
+import { parseBackendId, type KernelBackendId } from '../kernelPrefs.js'
 import { BTW_CONTEXT_BUDGET_DEFAULT, BTW_CONTEXT_TURNS_DEFAULT, DEFAULT_COMPANION_SKIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, normalizeBtwContextBudget, normalizeBtwContextTurns, normalizeCompanionSkin, normalizePageMargin, normalizeSidePanelPanels, normalizeSidePanelRatio, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from '../utils/keymap.js'
 import { normalizeSplashFont, type SplashFontSetting } from '../components/splashFonts.js'
@@ -47,11 +47,11 @@ export interface Config {
    *  `dsh-tui --backend <id>` sets it through `DSH_TUI_BACKEND`.
    *
    *  A plain `string` on purpose: this is the **input** surface, so an embedder
-   *  writing `{ backend: 'codex' }` keeps compiling. The value is gated right
-   *  below (`normalizeBackendChoice`: syntax, then registry) and the boot re-reads
-   *  it through that same gate — the `BackendId` brand stays inside the package,
-   *  where it guards session refs and `~/.dsh-tui/backends/<id>/` paths. Declaring
-   *  the branded `KernelBackendId` here breaks published consumers instead
+   *  writing `{ backend: 'codex' }` keeps compiling. The schema normalizes syntax;
+   *  the boot checks registry membership after assembling installed bundles.
+   *  The `BackendId` brand stays inside the package, where it guards session
+   *  refs and `~/.dsh-tui/backends/<id>/` paths. Declaring the
+   *  branded `KernelBackendId` here breaks published consumers instead
    *  (PR #1380 review R1). */
   backend?: string
   /** LLM provider route. The route resolves atomically (issue #67): the
@@ -288,10 +288,9 @@ export interface Config {
   upstreamRetry?: boolean
 }
 
-/** The backend a configured value names: case-insensitive, trimmed, and
- *  **registered** — both halves of the parse (P0 D1). Empty, malformed, or a
- *  well-formed id that no installed backend answers to → undefined, which the
- *  Config row and the boot both read as "not configured" (the DSH default). */
+/** The complete two-stage parse: syntax, then registry membership (P0 D1).
+ *  Empty, malformed or unregistered values mean "not configured". Unlike the
+ *  syntax-only Config schema, this helper requires discovery to have run. */
 export function normalizeBackendChoice(value: unknown): KernelBackendId | undefined {
   return parseBackendChoice(value)
 }
@@ -300,8 +299,10 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
   sessionId: Schema.string().required(false),
   // A transform, not a union: the row reads `DSH_TUI_BACKEND`, and a stray
   // export (`Claude`, a typo) must not fail the whole boot — case and blanks
-  // are normalized and anything unknown means the default (plugin.ts warns).
-  backend: Schema.transform(Schema.string(), value => normalizeBackendChoice(value)),
+  // are normalized here and the id-shape gate drops junk. Cordis validates
+  // before `apply` assembles installed backends: membership must wait until
+  // after that discovery, or a third-party Config choice is erased.
+  backend: Schema.transform(Schema.string(), value => parseBackendId(value)),
   // No schema defaults on the route: a `.default()` here would make an
   // unset key indistinguishable from an explicit cordis.yml choice and the
   // persisted `/model` preference could never win (issue #30). The defaults

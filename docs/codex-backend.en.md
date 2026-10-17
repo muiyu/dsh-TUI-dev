@@ -184,13 +184,20 @@ changes during a turn apply to the next one, not to reasoning already in progres
 - Command, file, network and permission approvals use server-provided choices. Allow-once,
   session allowance or remembered rules appear only when supported. Questions and MCP forms
   share the existing panel, with secret answers masked.
+- Codex's `request_user_input_async` opens the questionnaire while the agent continues
+  working. The first suggestion is selected by default; free text is also available.
+  Answers use the native question-reply envelope to steer, falling back to a queued
+  follow-up when steering is unavailable. Dismissal closes that question without
+  interrupting. Turn completion, connection loss and exit withdraw unanswered questions;
+  historical resume never reopens old questionnaires. Codex's persisted echo renders
+  as a quoted question and answer, including when rebuilding history.
 
 ## Daily commands and input
 
 | Entry | Behavior |
 | --- | --- |
 | `Enter` / `Tab` / `Ctrl+Enter` while working | Steer / queue a follow-up / interrupt and send now; non-steerable turns fall back to follow-up |
-| `Esc` / `Ctrl+C` | Dismiss the focused panel or interrupt. Cancelling a model question also interrupts its turn rather than leaving it hung |
+| `Esc` / `Ctrl+C` | Dismiss the focused panel or interrupt. Cancelling a blocking question interrupts its turn; dismissing an async question only closes that question |
 | `/review` | Review uncommitted changes inline; requires idle state and consumes model usage |
 | `/review base <branch>` / `/review commit <sha>` | Review against a branch or commit; other arguments are custom review instructions |
 | `/diff` | Latest turn’s aggregated diff; otherwise try Git diff against the remote, then show an empty-state notice |
@@ -238,8 +245,11 @@ past tokens/cost. Fresh usage notifications update the readings.
 - `/rename` changes the official thread title; `/color` stores a session accent, not a global theme.
 - `/fork` creates a resumable copy without switching. Double `Esc` or `/rewind` conversation
   rewind creates a copy before the selected question, returns the question to the composer
-  and preserves the original. Rewinding the first question creates an empty thread. **File-only
-  and conversation+files rewind are unsupported**; the Git working tree does not revert.
+  and preserves the original. Rewinding the first question creates an empty, resumable fork.
+  First-question rewind, or rewind without a loaded predecessor, requires Codex app-server
+  **0.160.1+**, checked from the connection handshake. Older or unknown server versions
+  receive an explicit upgrade notice; rewind with a loaded predecessor keeps its existing path.
+  **File-only and conversation+files rewind are unsupported**; the Git working tree does not revert.
 - Resume replays the newest 20 full turns before live continuation. Load older messages uses
   prefetched full-item pages, not tool-omitting summaries. Retry when prefetch is still pending;
   repeated failure reports a notice. Active resume deduplicates redelivered approvals and

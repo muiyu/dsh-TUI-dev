@@ -199,6 +199,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'turnUsage',
   'contextOccupancy',
   'contextBreakdown',
+  'team',
   'tps',
   'tpsSamples',
   'activityFrames',

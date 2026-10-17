@@ -229,7 +229,7 @@ export type AgentEvent =
    * `compaction`); `blocks` is everything the model saw. `injected` messages
    * (plugin/skill context) never render as bubbles.
    */
-  | { readonly type: 'user.message'; readonly id: string; readonly anchor: string; readonly seq: number; readonly turn?: number; readonly time: number; readonly source: 'user' | 'injected' | 'goal' | 'compaction' | 'command-output' | 'notification'; readonly text: string; readonly blocks: readonly ContentBlockView[]; readonly images?: readonly ImageRef[]; readonly label?: string }
+  | { readonly type: 'user.message'; readonly id: string; readonly anchor: string; readonly seq: number; readonly turn?: number; readonly time: number; readonly source: 'user' | 'injected' | 'goal' | 'compaction' | 'command-output' | 'notification' | 'team-message'; readonly text: string; readonly blocks: readonly ContentBlockView[]; readonly images?: readonly ImageRef[]; readonly label?: string; /** `team-message`: the sending member's name. */ readonly sender?: string }
   /**
    * Snapshot of the backend's queue of unclaimed user inputs (replaces the
    * previous one). `claimed`/`discarded` name the ids that left the queue in

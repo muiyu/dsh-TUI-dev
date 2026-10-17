@@ -111,31 +111,34 @@ async function disposeEntryRoot(ctx: Context): Promise<void> {
   }
 }
 
-async function runInEntry(kernel: KernelBackendId): Promise<void> {
+async function runInEntry(kernelBeforeHost: KernelBackendId): Promise<void> {
   // Without a usable dsh, DSH delegates to `dsh --profile`; the other kernels
-  // run on this package's own cordis.
+  // run on this package's own cordis. This pre-mount answer is only for the two
+  // failure paths below. The root starts neutral: its final composition mode is
+  // selected only after the Loader can assemble third-party backends.
   let root: HostRoot | undefined
   const exitSeam: ProcessExitSeam = {}
   try {
-    root = await prepareHostRoot(await loadHostDsh(), { profile, args: process.argv.slice(2), dsh: kernel === 'dsh', exitSeam })
+    root = await prepareHostRoot(await loadHostDsh(), { profile, args: process.argv.slice(2), exitSeam })
     markBoot('entry-hijacked')
   } catch (error) {
     markBoot('entry-host-unavailable')
     // No dsh at all: stop with the install guidance rather than delegate into
     // a spawn failure (on Windows `shell: true` hides the ENOENT).
-    if (kernel === 'dsh' && error instanceof Error && error.message === NO_DSH_ON_PATH) {
+    if (kernelBeforeHost === 'dsh' && error instanceof Error && error.message === NO_DSH_ON_PATH) {
       process.stderr.write(noDshGuidance())
       process.exit(1)
     }
-    noteHostUnavailable(kernel, error)
-    if (kernel === 'dsh') {
+    noteHostUnavailable(kernelBeforeHost, error)
+    if (kernelBeforeHost === 'dsh') {
       delegateToDsh()
       return
     }
   }
-  const [{ Config }, { apply, handleStartupError }, { createEntrySlot }, { deferRootCapabilityGuard, armRootCapabilityGuard }, { processGuardActive }, { logRestartEvent }] = await Promise.all([
+  const [{ Config }, { apply, handleStartupError }, { assembleBackendsFromProfile }, { createEntrySlot }, { deferRootCapabilityGuard, armRootCapabilityGuard }, { processGuardActive }, { logRestartEvent }] = await Promise.all([
     import('./index.js'),
     import('./plugin.js'),
+    import('./backend-assembly.js'),
     import('./entry-slot.js'),
     import('./host-access.js'),
     import('../ink/update-overflow-guard.js'),
@@ -144,6 +147,26 @@ async function runInEntry(kernel: KernelBackendId): Promise<void> {
   markBoot('entry-modules')
   const ctx: Context = root?.ctx ?? new (await import('@deepseek-ai/cordis')).Context()
   const env = process.env
+  // D-1: this entry decides the kernel *before* `apply` runs, and that decision is
+  // registry membership — `entryKernel` drops an id no backend answers for, and a
+  // third-party bundle's backend is only registered by the assembly below. So the
+  // installed bundles are assembled here first, on the mounted root's Loader, and
+  // the route is re-decided afterwards. `apply` assembles again; the pass is a
+  // no-op the second time. Without a host root there is no Loader and no profile to
+  // read: the assembly says so and registers nothing.
+  assembleBackendsFromProfile(ctx)
+  const kernel: KernelBackendId = entryKernel(env, { configured: configuredBackend(profile) })
+  try {
+    await root?.selectKernel(kernel === 'dsh')
+  } catch (error) {
+    if (kernel === 'dsh') {
+      noteHostUnavailable(kernel, error)
+      delegateToDsh()
+      return
+    }
+    handleStartupError(ctx, error)
+    return
+  }
   // cordis.patch.yml's dsh-tui row, rebuilt from the same environment; the
   // editable fields come from ./tui-settings.ts on top.
   const config = Config({
@@ -159,13 +182,14 @@ async function runInEntry(kernel: KernelBackendId): Promise<void> {
     log: logRestartEvent,
   })
   // Only a host root gets a composition (DSH without one was delegated above).
-  const slot = root === undefined ? undefined : createEntrySlot(kernel === 'dsh')
+  const slot = root === undefined ? undefined : createEntrySlot(kernel === 'dsh', root.kernelVersion)
   // Plugins use root capabilities while they activate: hold the TUI's guard
   // back until composition arms it (./host-access.ts).
   const releaseRootGuard = slot === undefined ? undefined : deferRootCapabilityGuard(ctx)
   try {
-    // `entryKernel`: the runtime must not re-resolve the kernel — its rebuilt
-    // Config lacks the profile patch's row this route was decided on.
+    // `entryKernel`: the runtime must not re-resolve the kernel — its rebuilt Config
+    // lacks the profile patch's row this route was decided on (the entry read that
+    // row above, after the assembly registered what an installed bundle declares).
     await apply(ctx, config, ctx, { deferBackendOpen: true, profile, entryKernel: kernel, exitSeam, ...(slot === undefined ? {} : { entrySlot: slot }) })
   } catch (error) {
     handleStartupError(ctx, error)

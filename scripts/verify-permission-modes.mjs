@@ -75,7 +75,7 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
     'read-only': { sandbox: 'read-only', approval: 'ask' },
     'workspace-write': { sandbox: 'workspace-write', approval: 'ask' },
     'danger-full-access': { sandbox: 'danger-full-access', approval: 'never' },
-    auto: { sandbox: 'workspace-write', approval: 'ask' },
+    balanced: { sandbox: 'workspace-write', approval: 'ask' },
     safe: { sandbox: 'workspace-write', approval: 'ask' },
     ro: { sandbox: 'read-only', approval: 'ask' },
     ws: { sandbox: 'workspace-write', approval: 'ask' },
@@ -91,11 +91,11 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
     return true
   }
   class PermissionRegistry {
-    names = names ?? ['read-only', 'workspace-write', 'auto', 'safe']
+    names = names ?? ['read-only', 'workspace-write', 'balanced', 'safe']
     entries = new Map([
       ['read-only', { value: 'read-only', name: 'Read only', description: 'No writes' }],
       ['workspace-write', { value: 'workspace-write', name: 'Workspace write', description: 'Write in the workspace' }],
-      ['auto', { value: 'auto', name: 'Auto', description: 'Choose automatically' }],
+      ['balanced', { value: 'balanced', name: 'Balanced', description: 'Choose automatically' }],
       ['safe', { value: 'safe', name: 'Safe', description: 'Curated policy' }],
       ['ro', { value: 'ro', name: 'Read only' }],
       ['ws', { value: 'ws', name: 'Workspace write' }],
@@ -103,7 +103,7 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
     ])
     current(subject) {
       if (this !== registry) throw new Error('registry receiver lost')
-      let value = 'auto'
+      let value = 'balanced'
       for (const event of logOf(subject)) {
         if (event.type === 'permission/preset' && typeof event.data?.preset === 'string') value = event.data.preset
       }
@@ -214,11 +214,11 @@ function makeEnv({ modes, names, bundles, history = [], permission = {}, withCom
 
 const baseOptions = { model: 'deepseek-chat', cwd: '/tmp', provider: 'deepseek', activity: false }
 
-const AUTO_ONLY_NAMES = ['read-only', 'workspace-write', 'auto']
+const AUTO_ONLY_NAMES = ['read-only', 'workspace-write', 'balanced']
 const AUTO_SEED = [
   { type: 'sandbox/mode', data: { mode: 'workspace-write' } },
   { type: 'approval/policy', data: { policy: 'ask' } },
-  { type: 'permission/preset', data: { preset: 'auto' } },
+  { type: 'permission/preset', data: { preset: 'balanced' } },
 ]
 
 // ---- 1. snapshot semantics ------------------------------------------------
@@ -227,12 +227,12 @@ const AUTO_SEED = [
   const channel = createChannel(env.ctx, env.agent, baseOptions)
   const snapshot = channel.permissionPresets()
   check('runtime registry readable with receiver intact', snapshot.availability === 'runtime')
-  check('options follow registry order', snapshot.options.map(o => o.value).join(',') === 'read-only,workspace-write,auto,safe')
-  check('current identity resolved', snapshot.current?.value === 'auto' && snapshot.current.kind === 'preset')
+  check('options follow registry order', snapshot.options.map(o => o.value).join(',') === 'read-only,workspace-write,balanced,safe')
+  check('current identity resolved', snapshot.current?.value === 'balanced' && snapshot.current.kind === 'preset')
   check('snapshot frozen', Object.isFrozen(snapshot) && Object.isFrozen(snapshot.options) && Object.isFrozen(snapshot.current))
   const first = channel.permissionPresets()
   env.events.push({ type: 'permission/preset', data: { preset: 'safe' } })
-  check('earlier snapshot stays stable', first.current?.value === 'auto')
+  check('earlier snapshot stays stable', first.current?.value === 'balanced')
   check('next read observes the new state', channel.permissionPresets().current?.value === 'safe')
 }
 {
@@ -247,9 +247,9 @@ const AUTO_SEED = [
 {
   const env = makeEnv({ history: AUTO_SEED })
   const channel = createChannel(env.ctx, env.agent, baseOptions)
-  check('dynamic preset derived as current mode', channel.mode.id === 'permission:auto', channel.mode.id)
+  check('dynamic preset derived as current mode', channel.mode.id === 'permission:balanced', channel.mode.id)
 
-  await channel.cycleMode() // auto → safe
+  await channel.cycleMode() // balanced → safe
   check('cycle reaches the next dynamic preset', channel.mode.id === 'permission:safe', channel.mode.id)
   check('dynamic switch used the official command', env.commands.join(',') === '/permission safe', JSON.stringify(env.commands))
 
@@ -280,7 +280,7 @@ const AUTO_SEED = [
   const channel = createChannel(env.ctx, env.agent, baseOptions)
   const before = env.events.length
   await channel.cycleMode()
-  check('unconfirmed switch leaves the mode unchanged', channel.mode.id === 'permission:auto', channel.mode.id)
+  check('unconfirmed switch leaves the mode unchanged', channel.mode.id === 'permission:balanced', channel.mode.id)
   check('unconfirmed switch appends no mode events', env.events.length === before, `${env.events.length - before} appended`)
   check('failure is logged', env.warnings.some(w => w.includes('not confirmed')))
   env.behavior.confirm = true
@@ -306,8 +306,8 @@ const AUTO_SEED = [
     ],
   })
   const channel = createChannel(env.ctx, env.agent, { ...baseOptions, modes: env.modes })
-  check('dynamic identity visible before plan', channel.mode.permission === 'auto', channel.mode.id)
-  await channel.cycleMode() // auto → plan
+  check('dynamic identity visible before plan', channel.mode.permission === 'balanced', channel.mode.id)
+  await channel.cycleMode() // balanced → plan
   check('plan entered through the official path', channel.mode.id === 'plan', channel.mode.id)
   check('plan entry canonicalized to read-only', env.commands.includes('/permission read-only'), JSON.stringify(env.commands))
 
@@ -318,9 +318,9 @@ const AUTO_SEED = [
 
   check('plan exit restores the original sandbox', fold(env.events, 'sandbox/mode', 'mode') === 'workspace-write')
   check('plan exit restores the original approval', fold(env.events, 'approval/policy', 'policy') === 'ask')
-  check('plan exit returns to the remembered pre-plan preset', fold(env.events, 'permission/preset', 'preset') === 'auto', fold(env.events, 'permission/preset', 'preset'))
-  check('identity restore used the service write path', env.commands.includes('/permission auto'), JSON.stringify(env.commands))
-  check('mode indicator shows the remembered preset again', channel.mode.id === 'permission:auto', channel.mode.id)
+  check('plan exit returns to the remembered pre-plan preset', fold(env.events, 'permission/preset', 'preset') === 'balanced', fold(env.events, 'permission/preset', 'preset'))
+  check('identity restore used the service write path', env.commands.includes('/permission balanced'), JSON.stringify(env.commands))
+  check('mode indicator shows the remembered preset again', channel.mode.id === 'permission:balanced', channel.mode.id)
   check('no reentrant appends during the restore', env.reentrancy() === 0)
 }
 
@@ -330,21 +330,21 @@ const AUTO_SEED = [
     history: [{ type: 'permission/preset', data: { preset: 'read-only' } }],
     modes: [
       { id: 'read', permission: 'read-only' },
-      { id: 'invalid', permission: 'auto extra' },
-      { id: 'auto', permission: 'auto' },
+      { id: 'invalid', permission: 'balanced extra' },
+      { id: 'balanced', permission: 'balanced' },
     ],
   })
   const channel = createChannel(env.ctx, env.agent, { ...baseOptions, modes: env.modes })
   check('unsafe configured identity warns at load', env.warnings.some(w => w.includes('unsafe permission identity')))
   await channel.cycleMode()
-  check('cycle skips the unsafe mode and reaches the next valid one', channel.mode.id === 'auto', channel.mode.id)
-  check('switch used the official command only for the valid target', env.commands.join(',') === '/permission auto', JSON.stringify(env.commands))
+  check('cycle skips the unsafe mode and reaches the next valid one', channel.mode.id === 'balanced', channel.mode.id)
+  check('switch used the official command only for the valid target', env.commands.join(',') === '/permission balanced', JSON.stringify(env.commands))
 }
 {
   const env = makeEnv({
     noService: true,
-    history: [{ type: 'permission/preset', data: { preset: 'auto' } }],
-    modes: [{ id: 'invalid', permission: 'auto extra' }],
+    history: [{ type: 'permission/preset', data: { preset: 'balanced' } }],
+    modes: [{ id: 'invalid', permission: 'balanced extra' }],
   })
   const channel = createChannel(env.ctx, env.agent, { ...baseOptions, modes: env.modes })
   check('all-invalid configured roster falls back to defaults', channel.mode.id === 'default', channel.mode.id)
@@ -384,7 +384,7 @@ const AUTO_SEED = [
     ],
   })
   const channel = createChannel(env.ctx, env.agent, { ...baseOptions, modes: env.modes })
-  await channel.cycleMode() // auto → plan: canonicalization must use service.set
+  await channel.cycleMode() // balanced → plan: canonicalization must use service.set
   check('cycle canonicalization works without the external command', channel.mode.id === 'plan', channel.mode.id)
   check('identity moved to read-only through the service', fold(env.events, 'permission/preset', 'preset') === 'read-only')
 }
@@ -393,7 +393,7 @@ const AUTO_SEED = [
 {
   const renamed = { ro: { sandbox: 'read-only', approval: 'ask' }, ws: { sandbox: 'workspace-write', approval: 'ask' }, full: { sandbox: 'danger-full-access', approval: 'never' } }
   const env = makeEnv({
-    names: ['ro', 'ws', 'full', 'auto'],
+    names: ['ro', 'ws', 'full', 'balanced'],
     bundles: renamed,
     history: AUTO_SEED,
     modes: [
@@ -402,7 +402,7 @@ const AUTO_SEED = [
     ],
   })
   const channel = createChannel(env.ctx, env.agent, { ...baseOptions, modes: env.modes })
-  // auto (declared bundle workspace-write+ask) → plan needs the renamed
+  // balanced (declared bundle workspace-write+ask) → plan needs the renamed
   // canonical 'ro' for the read-only bundle.
   await channel.cycleMode()
   check('renamed table canonicalization reaches plan', channel.mode.id === 'plan', channel.mode.id)

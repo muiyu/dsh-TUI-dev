@@ -417,8 +417,8 @@ export const TIPS: readonly Tip[] = [
   {
     id: 'cmd-plugins',
     group: 'commands',
-    zh: '/plugin check <清单路径> 诊断插件兼容性',
-    en: '/plugin check <manifest> diagnoses plugin compatibility',
+    zh: '/plugin 装 / 卸 / 启停插件；check <清单路径> 诊断兼容性',
+    en: '/plugin installs, removes and switches plugins; check <manifest> diagnoses one',
   },
   {
     id: 'cmd-update',

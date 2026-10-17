@@ -10,7 +10,7 @@
 
 `Backend` 是继 `SettingsSection` 与 `Scene` 之后的第三个贡献族，与它们同处一个 manifest extension catalog：它声明**一个后端在宿主里长什么样**——身份、标签、它运行期答话的会话能力、它索要的宿主权限、它的安装面与卸载出口。声明是数据，不是权威：后端在本进程内运行，见「Grants and the trust model」。
 
-贡献族今天的准入状态是**已接线（W-2，Stage C）**：definition、validator、handler assertion、contract profile、conformance requirement、宿主侧门禁，以及"清单 → registry → descriptor"这条链路都已就位——`Backend` 是宿主发布的契约坐标，第三方 bundle 的 `x-dsh-tui` 声明由生产准入 catalog 里的同一份扩展定义校验。仍未做的是把**已挂载 bundle 的声明接进注册表与 picker** 的那一步（装链路，见末节）。
+贡献族今天的准入状态是**已接线（W-2，Stage C）**：definition、validator、handler assertion、contract profile、conformance requirement、宿主侧门禁，以及"清单 → registry → descriptor"这条链路都已就位——`Backend` 是宿主发布的契约坐标，第三方 bundle 的 `x-dsh-tui` 声明由生产准入 catalog 里的同一份扩展定义校验。**已装 bundle 的声明接进注册表与 picker** 的装配链路也已接线（D-1，见末节）。
 
 ## Declaration fields
 
@@ -39,6 +39,9 @@
 
 `grants` 只取宿主自己的权限词表 `registry/permissions-0.1.json`（闭集，8 条）。已知名字而没人授权 → 判定 `waiting_authorization`、`reasonCode` 为 `PERMISSION_NOT_GRANTED`：条目**注册但不进 picker**（`listOfferedBackends()`）——id 存在，启动的两段解析与 session refs 都必须找得到它，但选中它等于打开一个宿主描述不了的后端。未知名字沿用同一条「降级不拒绝 + 记为待决项」（`permission:<name>`）：静默当作可用等于宣称一条没人能撤销的授权，拒绝则等于自己发明一套权限词表。
 
+等待授权同时约束执行：`probeKernels()` 跳过该条目，`loadBackend()` 在 import 之前以
+`PERMISSION_NOT_GRANTED` 拒绝加载；显式的环境变量、配置与恢复请求也不能绕过这一检查。
+
 准入判定本身是纯函数 `backendAdmission(spec, host)`，返回 `BackendAdmission`，沿用插件准入的五态词汇：`compatible`、`compatible_degraded`（带 `missingOptional`）、`waiting_authorization`（带 `deniedPermissions`），以及不会成为注册表条目的 `rejected`（`BACKEND_ID_RESERVED`）与 `unknown`——后两者由调用方抛错，内建 manifest 走到那里必须是响亮的构建期错误。
 
 contract 的 `errors` 只发布**有产出者**的码，今天正好是上面两个：`BACKEND_ID_RESERVED`（准入拒绝）与 `PERMISSION_NOT_GRANTED`（等待授权，复用插件准入的词表）。形状违规（`label` 用宿主 i18n 键、声明 `nativeKey`）由 `validateBackendSpec()` 以未知字段的 `TypeError` 拒绝，不占错误码；能力/恢复不匹配一类的码在 C 段给出真正产出点之前不发布——发布没有产出者的码，等于让第三方为一条永远走不到的失败路径写错误处理。这一对由 `scripts/verify-backend-contribution.ts` 钉住。
@@ -48,6 +51,8 @@ contract 的 `errors` 只发布**有产出者**的码，今天正好是上面两
 ## Install surface
 
 `install` 是 `{ executor, specifier, version }`，三个字段都必须是非空字符串，缺一个即 validation 失败。执行器是**宿主实现的表**（首版只有 `pnpm-profile-add`）：宿主不认识的执行器读作「无安装面」（`installable: false`，那一行退回检测自己的 hint），不是拒绝注册。`install` 缺省也是一等公民——用户自己装的二进制就是依赖（codex 形态），声明「装什么、哪个版本、交给宿主哪个执行器」这件事只有真的能装的后端才做。
+
+**D-2（2026-10-17）：暂不加第二个执行器。** 执行器只服务**后端自己的** SDK 安装——**不是**插件 bundle 的发行方式：bundle 走 `/plugin install` / `dsh plugin add`，那条路本来就收包名 / 路径 / git URL（生态里十多个收录包确实不在 npm 上，靠 tarball、git 或本地目录分发，但那是**插件管理器**的活，与本表无关）。而生态侧 42 条收录里第三方 `Backend` 声明为 **0**、也没有一条声明任何 `install` 配方——没有真消费者，也没有可观察的需求形状（目录 / Git spec / tarball URL 是三道不同的程序），此时冻形状等于给没人跑过的路定契约。将来出现**第一个真第三方 `Backend` bundle、且它需要宿主代装非 npm 来源的 SDK** 时再加取值：只增不删、不改坐标，加它不是 breaking（承诺 6）。
 
 ## Resume semantics
 
@@ -112,6 +117,8 @@ Conformance requirement 是 `TUI-BACKEND-001`（记在 `conformance/requirements
 
 执行体有两层：profile 套件（`conformance/tests/run.js` 的 Backend 段）是参考实现，但它**不在任何自动化里**；仓内 `scripts/verify-plugin-spec.ts` 的 Backend 段是它在 CI（`verify:build`）里的执行体，**两边期望必须同改**。清单交叉校验不读取 `run.js` 的用例表，不能自动发现两边期望的差异。宿主侧的两条不变量（"未加载即不关池"、"只关真的加载过的条目"）**不在这一层**：它们是宿主行为、无法用 manifest fixture 表达，只能由 `scripts/verify-backend-contribution.ts` 与 `scripts/verify-backend-registry.ts` 的 probe 夹具钉住。
 
+还有一类**有意不写**的反例：`invalid-backend-install-executor-unknown`。未知执行器不是拒绝（见「Install surface」），形状校验也不查执行器表，所以它在 profile 层表达不出可红的期望——按「不能红的用例不写」的纪律不写。这条语义由宿主侧承重：`scripts/verify-backend-registry.ts` 的 `an executor this host does not implement registers as "no install surface"`（不抛错、不开向导、配方保留）一条用例。
+
 宿主侧门禁是 `scripts/verify-backend-contribution.ts`：内建 manifest 的投影 dogfood、两份词表的单一真源、准入判定、`scripts/fixtures/probe-backend/` 这个假后端的资源不变量与安装面两态、坏声明必须红，以及末节的范围守卫。
 
 ## Public surface（frozen）：承诺什么、不承诺什么
@@ -142,7 +149,7 @@ Conformance requirement 是 `TUI-BACKEND-001`（记在 `conformance/requirements
 
 | # | 不承诺 | 现状锚点 |
 |---|---|---|
-| 1 | **把 bundle 的声明接进 registry / picker 的那一步**（装链路，Stage C 的后续工作）：准入链路本身已接线 | 末节 |
+| 1 | ~~**把 bundle 的声明接进 registry / picker 的那一步**（装链路，Stage C 的后续工作）~~ —— **D-1 已交付**：装配链路见下节「Assembled (D-1)」。仍然**不承诺**的是它的时序推论：装了但**没重启**就期望 picker 出现 | 「Assembled (D-1)」节 |
 | 2 | `native.*` 与 DSH 的 specialist 能力**始终留首方侧**；`nativeKey` 缺省即"不使用 native 通道"，宿主**不得凭空补规则** | `ADAPTER.md` 的派生规则 + `verify-adapter-boundary` 的 `EXPECTED_NATIVE_RULES` 快照 + 拷贝树注入（`verify-backend-registry`）；贡献声明 `nativeKey` 会被 `validateBackendSpec()` 以未知字段拒（`invalid-backend-unknown-field.json` 就是这条反例） |
 | 3 | `BackendHandler.catalog` 的**方法签名**（协议侧是 `object`；`SessionCatalog` 的形状会随主线演进） | `protocols/tui-contributions.d.ts` |
 | 4 | `lastSession` 的接口与恢复目标的传递方式（含 `DSH_TUI_RESUME_BACKEND` 这个 env 名）：**语义进协议，接口不进** | 「Resume semantics」节 |
@@ -152,7 +159,7 @@ Conformance requirement 是 `TUI-BACKEND-001`（记在 `conformance/requirements
 
 ### 破坏性变更怎么被发现
 
-坐标（`apiVersion + kind`）不变就不得改已承诺的语义；**门禁只覆盖各自断言的范围，并不能自动发现所有语义变更**，所以这张清单的作用是让"改哪一块会被谁拦住"可查。`verify-plugin-spec` 检查声明形状、fixture 期望与"篡改 profile 必败"；`verify-backend-contribution` 检查内建投影、词表（含 `confirmation` 取值集合"只增不删"的正反两面）、准入、probe 资源不变量与 **W-2 的接线正断言**；`verify-public-config-types` 检查消费者使用已发布类型与导出的写法；`verify-i18n` 现在还包含**跨字典一致性**（共用平台文案已收口为单一数据源）；`verify-protocol-single-source` 检查协议来源与派生常量一致性；`verify:contract` 检查 DSH 上游版本与独立入口宿主契约。
+坐标（`apiVersion + kind`）不变就不得改已承诺的语义；**门禁只覆盖各自断言的范围，并不能自动发现所有语义变更**，所以这张清单的作用是让"改哪一块会被谁拦住"可查。`verify-plugin-spec` 检查声明形状、fixture 期望与"篡改 profile 必败"；`verify-backend-contribution` 检查内建投影、词表（含 `confirmation` 取值集合"只增不删"的正反两面）、准入、probe 资源不变量与 **W-2 的接线正断言**；**`verify-backend-assembly` 检查 D-1 的装配链**（五态、拒因归属、入口解析与清单归属、entry 的固定事实、懒加载与池记账、以及"装配早于解析"的坏基线）；`verify-backend-registry` 检查注册表自身的响亮检查、两段解析、池台账与第三方 entry 的构造；`verify-public-config-types` 检查消费者使用已发布类型与导出的写法；`verify-i18n` 现在还包含**跨字典一致性**（共用平台文案已收口为单一数据源）；`verify-protocol-single-source` 检查协议来源与派生常量一致性；`verify:contract` 检查 DSH 上游版本与独立入口宿主契约。
 
 Backend contract profile 自 W-2 起**已在 `profileHash` 校验范围内**（`registry/registry-0.15.json` 的 `tui.backend` 条目 + `registry/contracts/backend-v1alpha1.json`）：仅修改 profile 正文、保持坐标不变，`verifyRegistry()` 会报 `profileHash drifted`，descriptor 也随之丢弃该契约——"改正文不换坐标"因此是红的。
 
@@ -164,6 +171,7 @@ Backend contract profile 自 W-2 起**已在 `profileHash` 校验范围内**（`
 4. **"宿主只对真的加载过的条目记账并调用 `unloadExport`"是宿主的**不变量，第三方无法用声明表达它——它由 probe 夹具与 registry 的池台账钉住，不在 conformance fixture 层。
 5. ~~**Backend contract 的 digest 与坐标语义保护尚未接线**~~ —— **W-2 已关闭**：contract profile 已进 registry 的 digest 校验范围（见「破坏性变更怎么被发现」）。仍不覆盖的是**历史坐标的语义比较**（旧坐标正文是否被改过只能靠 digest，没有语义 diff）；那属于 D 段生态治理，不是本族的接入条件。
 6. **profile 套件与仓内镜像在 `extensions` 段上有一处口径差（已知，未关闭）**：`conformance/tests/admission-core.js` 的坐标索引仍只由 `imports + definitions` 构成（所以它遇到 `requires.contracts` 里的扩展坐标会按"未知 kind"抛错），而生产侧 `registryEntries()` 自 W-2 起把 `extensions` 一并纳入（于是同一个请求在仓内落成 `rejected`/`REQUIRED_PROTOCOL_UNAVAILABLE`）。两者对**已实现的用例**期望一致（套件 46 例全绿、镜像门同绿），差异只在"扩展坐标作为 requires 引用"这一条路径上；要不要把参考实现也扩到 `extensions`，留到 C 段后续（`docs/plugins.md` 的兼容承诺不受影响）。
+7. **导出名只能是 `backend`（D-1 的既定约定，不是承诺）**：声明里没有"实现导出叫什么"的字段（`backendExport` 是 in-tree 私有项），所以宿主固定读包入口模块的 `backend` 导出。想放开就得**加一个声明字段**（只增不删，不破面），今天没有真需求——第三方实例为零（D 段开工时的生态勘察结论）。门禁把这条钉成一个具体的事实：第三方 entry 的 `backendExport` 必须缺席且缺省解析到 `backend`（`verify-backend-registry`、`verify-backend-assembly`）。
 
 ## Wired (W-2) — what stage C connected, and what is still open
 
@@ -175,4 +183,56 @@ Backend contract profile 自 W-2 起**已在 `profileHash` 校验范围内**（`
 - **唯一注册贡献定义的生产模块是规范准入 catalog 的装配点**（`src/adapter/standard/tui-extension.ts` 的 `buildAdmissionCatalog()` 调 `registerTuiContributionExtensions(manifests)`）——bundle 的 `x-dsh-tui` 声明因此在 `admitInternal` 的 `manifests.validate()` 里有定义可解析。
 - **协议的协议面**：`Backend` 同时是宿主发布的契约坐标（`tui-profile/protocols/profile-definitions.js` 的 `backendDefinition`，与 `DecisionEvents` 同一个 provider 形状）：bundle 可以在 `requires.contracts` 里引用它。贡献**声明**的形状与语义一字未改（`tui-contributions.js` 的 `backendExtensionDefinition` 仍是唯一的书写面）。
 
-**仍未做（装链路的活，不是本族的接入条件）**：把**已挂载 bundle** 的 `x-dsh-tui` 声明读出来接进 `registerBackend()` / picker——今天注册表只有内置种子（`backend-registry.ts` 自述 "the plugin discovery of Stage C is the intended second caller"，那个 caller 还没有）。`/plugin` 的安装链（Stage C 的后续 PR）落地时，`Backend` 的声明才是从"能被准入"变成"真的出现在 picker 里"。
+## Assembled (D-1) — where an installed bundle becomes a registry entry
+
+**装链路的那个 caller 有了。** `src/dsh-adapter/backend-assembly.ts` 在启动时把 profile 声明的**已装
+bundle** 的 `x-dsh-tui` `Backend` 声明接进 `registerBackend()`，于是"装一个第三方后端 bundle，
+重启后它出现在 kernel picker 里"成立。逐条（由装配、配置与宿主回归共同钉住）：
+
+- **输入 = 文件，不是服务，也不是 fiber**：读 profile 清单的 `dsh.profile.bundles`（`/plugin install`
+  与 `dsh plugin add` 都写它；profile 目录由 `Context.baseUrl` 给出，Loader 组合每一行时继承它）。
+  插件管理服务的 `listBundles()` 是异步的、fiber 激活更晚（bundle 自己的行由 profile 的
+  `cordis.patch.yml` 提供、组合在 bundle 层**之后**），两者都必然晚于解析。
+- **时序 = 同步、早于成员判定，两个调用点**：Config Schema 只做语法校验；装配在 `apply` 里、
+  `parseBackendChoice()` 的注册表成员判定之前跑，不能在 Schema 阶段抹掉尚未注册的第三方 id。
+  独立入口（`dsh-tui`）先准备中性的 Loader/模块解析根，装配后按 handoff → Config 行 →
+  `DSH_TUI_BACKEND` → `kernel.json` 决定最终内核；`HostRoot.selectKernel()` 用该值选择 DSH 专用
+  服务与完整/轻量 profile，入口 slot 和 runtime 也用同一个值。发现前的路由只用于宿主不可用时的
+  回退，不能预先决定组合形态。`apply` 里再装配时，**同一组合上的第二遍是 no-op**。
+  `verify-backend-config` 驱动真实 Cordis Schema-before-apply 顺序；`verify-backend-host` 驱动真实
+  Loader/profile include，覆盖 env、记忆与静态 Config 选择，以及 DSH 对照。装配本身不依赖 bundle 行激活。
+- **身份 = Loader 的 resolver + 最近的包根**：解析 bundle 的入口用 Loader 自己的
+  `internal.resolveSync`（v1/v2 双签名），清单只在确立包根的 `package.json` **同目录**才算数
+  （#1568）。`loader.internal` 缺席 ⇒ **一个包都不注册**并给出一行原因：`import()` 会相对**本模块**
+  解析，那个答案会指向 Loader 从不执行的模块，所以宁可不答。
+- **投影 = `backendManifestOf()`**（`src/dsh-adapter/backend-contribution.ts`，与
+  `backendContributionOf()` 互为逆，公开导出面只增不删）：写死 `inTree: false`、字面量 label，
+  **不写** `alwaysAvailable` / `nativeKey` / `vendorPackages` / `backendExport`（注册表对前者响亮拒绝，
+  后者是 in-tree 的读法），`confirmation` 留在声明侧（它是安装/启用链路读的请求）。
+- **准入一个字没改**：`validateBackendSpec()` → `backendAdmission()` 五态原样适用——
+  `compatible` 进 picker、`compatible_degraded` 注册 + 记待决项、`waiting_authorization` 注册但
+  **不进 picker**、`rejected`（保留 id）与形状违规拒绝注册。
+  读取器先确保候选声明通过规范 `projectManifest()`（含贡献身份唯一性），不会注册规范投影
+  拒绝的清单。等待授权的后端不参与探测、不能加载，即使启动时显式指定它。
+- **实现出口 = 包入口模块命名空间的 `backend`**：`backendExport` 不进公开面，所以声明无法命名
+  另一个导出；`unloadExport` 从同一个命名空间取。**模块只在真的选中时才 import**（装了没选的后端
+  不执行，"未加载即不关池"照旧由注册表记账）。
+  当前每个 bundle 只能绑定一个 `Backend` 声明，多个声明整体拒绝；加载时断言 handler 形状及
+  `handler.id === spec.id`，避免会话和数据目录串到另一个后端。已 import 的模块即使 handler
+  被拒，其有效 `unloadExport` 仍由退出漏斗收尾。
+- **拒因归属 + 容器化**：读不懂的清单、算不出的入口、被拒的注册各给一行**归属到该 bundle** 的告警，
+  其余 bundle 照常装配；不是 TUI 插件的 bundle（无包根清单）静默略过。
+
+**一条随本段修掉的次序**：注册表的"保留 id"检查原本排在"是否已注册"之后，而三个内建 id 在模块
+加载时就被种子占用，于是协议承诺的 `BACKEND_ID_RESERVED` 拒绝在注册路径上**永远不可达**，冒用
+`claude` 的插件只会看到"already registered"。现在保留检查在前，注册路径给出的正是那条规则
+（内建路径不受影响：in-tree manifest 本来就不走这条分支）。
+
+**门禁**：`scripts/verify-backend-assembly.ts`、`verify-backend-config.ts` 与 `verify-backend-host.ts`
+登记在 `session-workspace`；`verify-backend-registry` 60 → **65**（第三方 entry 的构造：非 inTree 规则、
+`backendExport` 缺省解析、投影与准入双向）、`verify-public-config-types` 与 profile 套件零改动。
+可照抄的实例 = 仓内夹具 **`scripts/fixtures/third-party-backend/`**（按公开面写的第三方 bundle，
+`package.json` + `cordis.patch.yml` + `dsh-plugin.json` + `backend.js`，不发布）。
+
+**仍未做**：真装演练（可写 `HOME`/`DSH_HOME` 的机器上 `/plugin install` 一个真 bundle → 重启 →
+picker）。仓内能做的替代是门禁的真装配链（一次性 profile + 真 Cordis 组合 + 真 Loader resolver）。

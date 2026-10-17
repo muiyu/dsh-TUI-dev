@@ -123,11 +123,19 @@ import { PermissionsPicker } from '../components/PermissionsPicker.js'
 import { ModePicker } from '../components/ModePicker.js'
 import { KernelPicker } from '../components/KernelPicker.js'
 import { SdkInstallWizard, type SdkInstallPhase } from '../components/SdkInstallWizard.js'
+import { PluginInstallPane } from '../components/PluginInstallPane.js'
+import { PluginManagePane } from '../components/PluginManagePane.js'
 import type { SdkInstaller, SdkInstallSurface } from '../agent/backend.js'
+import type { PluginInstallFlow, PluginInstallSink, PluginInstallStep } from '../dsh-adapter/plugin-install.js'
+import type { PluginManageFlow, PluginManageSink, PluginManageStep } from '../dsh-adapter/plugin-manage.js'
+import type { TeamCommandOutcome, TeamCommandSink } from '../dsh-adapter/team-mode.js'
+import { teamMemberCounts } from '../components/teamRoster.js'
+import { usePluginWriteFlow } from './chat/usePluginWriteFlow.js'
 import { ChannelPicker } from '../components/ChannelPicker.js'
 import type { KernelEntry, KernelStatus } from '../components/kernelCatalog.js'
 import type { KernelBackendId } from '../kernelPrefs.js'
 import { modeDisplayName } from '../sessionModes.js'
+import { PERMISSION_PRESET_AUTO, permissionPresetLabel } from '../permissionPresetLabels.js'
 import { PlanPicker } from '../components/PlanPicker.js'
 import { LangPicker } from '../components/LangPicker.js'
 import { ThemePicker, getThemeOptions } from '../components/ThemePicker.js'
@@ -263,11 +271,25 @@ function cleanCommandError(error: unknown): string {
   }
 }
 
+/** Picking the experimental `auto` preset from the picker asks first, unless
+ *  the session already sits on it. A typed `/permission auto` does not. */
+function needsAutoConfirm(snapshot: PermissionPresetSnapshot, value: string | undefined): boolean {
+  return value === PERMISSION_PRESET_AUTO && snapshot.autoConfirmed !== true
+}
+
+/** The current identity's display name, localized like the picker rows. */
+function currentPermissionName(snapshot: PermissionPresetSnapshot): string | undefined {
+  const current = snapshot.current
+  if (current === undefined) return undefined
+  return current.kind === 'preset' ? permissionPresetLabel(current) : current.name
+}
+
 function clonePermissionPresetSnapshot(snapshot: PermissionPresetSnapshot): PermissionPresetSnapshot {
   return {
     availability: snapshot.availability,
     options: snapshot.options.map(option => ({ ...option })),
     ...(snapshot.current === undefined ? {} : { current: { ...snapshot.current } }),
+    ...(snapshot.autoConfirmed === true ? { autoConfirmed: true } : {}),
   }
 }
 
@@ -391,6 +413,9 @@ export function Chat({
   onProbeKernels,
   kernelEntries = EMPTY_KERNEL_ENTRIES,
   onResolveSdkInstall,
+  onPluginInstall,
+  onPluginManage,
+  onTeamCommand,
   kernelPinned,
   fullscreen = false,
   trajectorySeen: trajectorySeenProp,
@@ -472,6 +497,35 @@ export function Chat({
    * 同一个派生事实，用户点哪行就装哪行（Stage B / §6 第 12 条）。
    */
   onResolveSdkInstall?: (id: KernelBackendId) => SdkInstallSurface | undefined
+  /**
+   * `/plugin install <spec>`: the write path (Stage C-4). The entry builds the
+   * flow out of the host plugin service, the packaged first-party feed and the
+   * install notice, and answers `undefined` for anything else — an argument
+   * that is not an install form, or a launch with no service to install
+   * through. The caller then runs the ordinary read-only report.
+   *
+   * `sink.binding` is the session the flow is fenced to (the flow drops its own
+   * output once that session moves on); `sink.onLines` writes its lines into
+   * the transcript.
+   */
+  onPluginInstall?: (args: string, sink: PluginInstallSink) => PluginInstallFlow | undefined
+  /**
+   * `/plugin remove|enable|disable <target>` (C-5): the lifecycle write path,
+   * wired to `createPluginManageEntry`. `undefined` means the input is none of
+   * those three forms, or this launch has no profile plugin service — the screen
+   * then runs the read-only report, which is where the CLI route is printed.
+   *
+   * The sink is the install sink's twin minus cancellation: these three actions
+   * have none to offer, so `sink.binding` / `sink.busy` / `sink.onLines` are the
+   * whole contract.
+   */
+  onPluginManage?: (args: string, sink: PluginManageSink) => PluginManageFlow | undefined
+  /**
+   * `/team [status] | on | off`, wired to `createTeamCommandEntry`: on/off
+   * hand back a lifecycle flow on the Agent Teams bundle (same pane as
+   * `/plugin`), status a report. `undefined` on a backend without it.
+   */
+  onTeamCommand?: (args: string, sink: TeamCommandSink) => TeamCommandOutcome
   /** 启动参数（Config 行 / DSH_TUI_BACKEND）压过了记忆：选择器明说。 */
   kernelPinned?: boolean
   /**
@@ -682,6 +736,61 @@ export function Chat({
       permissionOverlayFocusRef.current = null
     }
   }, [overlay])
+  // The preset registry and the session's current preset can change while
+  // the picker is open (the experimental `auto` preset registers or leaves
+  // live; another surface switches the preset; a session adopt moves to a
+  // fresh log). Reopen on the live snapshot, keeping the focused preset; a
+  // confirmation whose preset left drops back to the list. The channel
+  // memoizes the snapshot, so an unchanged roster, current identity and
+  // `autoConfirmed` flag are the same object and the resync stops there.
+  const permissionResyncRef = React.useRef<{ overlay: unknown; live: PermissionPresetSnapshot } | null>(null)
+  React.useEffect(() => {
+    if (overlay.kind !== 'permission') {
+      permissionResyncRef.current = null
+      return
+    }
+    let live: PermissionPresetSnapshot
+    try {
+      live = channel.permissionPresets()
+    } catch {
+      return
+    }
+    const seen = permissionResyncRef.current
+    if (seen?.overlay === overlay && seen.live === live) return
+    permissionResyncRef.current = { overlay, live }
+    const values = (snapshot: PermissionPresetSnapshot) => snapshot.options.map(option => option.value).join('\n')
+    // A roster value change is the obvious case; the current identity and the
+    // session-scoped `autoConfirmed` flag can also move without changing the
+    // option values (another surface switches the preset, a session adopt
+    // lands, the auto preset leaves after a confirmation). Refresh on either,
+    // so `needsAutoConfirm` never reads a stale flag from another session.
+    if (
+      values(live) === values(overlay.snapshot)
+      && live.availability === overlay.snapshot.availability
+      && live.current?.value === overlay.snapshot.current?.value
+      && live.current?.kind === overlay.snapshot.current?.kind
+      && live.autoConfirmed === overlay.snapshot.autoConfirmed
+    ) return
+    if (live.availability === 'unavailable' || live.options.length === 0) {
+      dispatchOverlay({ type: 'close-if', kind: 'permission' })
+      return
+    }
+    const focusIndex = permissionOverlayFocusRef.current?.overlay === overlay
+      ? permissionOverlayFocusRef.current.index
+      : overlay.index
+    const focused = overlay.confirm === true ? PERMISSION_PRESET_AUTO : overlay.snapshot.options[focusIndex]?.value
+    const liveCurrent = live.current?.kind === 'preset' ? live.current.value : undefined
+    const index = [focused, liveCurrent]
+      .map(value => live.options.findIndex(option => option.value === value))
+      .find(found => found >= 0) ?? Math.min(1, live.options.length - 1)
+    const confirm = overlay.confirm === true && live.options.some(option => option.value === PERMISSION_PRESET_AUTO)
+    if (overlay.confirm === true && !confirm) channel.notify(t('permission-auto-unavailable'), { color: 'warning' })
+    dispatchOverlay({
+      type: 'open-if',
+      overlay: { kind: 'permission', index, snapshot: clonePermissionPresetSnapshot(live), ...(confirm ? { confirm } : {}) },
+      when: ['permission'],
+    })
+  })
   const [models, setModels] = React.useState<readonly LlmModelInfo[]>([])
   const [modelsLoading, setModelsLoading] = React.useState(false)
   const modelCatalogGeneration = React.useRef(0)
@@ -961,6 +1070,75 @@ export function Chat({
       }
       runSdkInstall(dir)
     })
+  }
+  /**
+   * `/plugin install <spec>` 的步骤态（C-4）。六件套（ref / state / 收尾 / 结算 /
+   * 栅栏 / 起步）与 manage 侧共用 `usePluginWriteFlow`，两处的差异只有「关浮层
+   * 要不要取消」与「Enter 调哪个方法」。
+   */
+  const pluginInstall = usePluginWriteFlow<PluginInstallStep, PluginInstallFlow>({
+    overlayKind: 'plugin-install',
+    overlay,
+    dispatchOverlay,
+    pushLocal: lines => channel.pushLocal('/plugin', lines),
+    initialStep: { kind: 'done' },
+    // 装了半截就关浮层会把 profile 留在半装状态：取消由服务自己结算（回滚）。
+    cancelOnClose: flow => flow.cancel(),
+    failureLine: error => t('plugins-install-failed', { reason: cleanScalarText(error, COMMAND_RESULT_CELLS) }),
+  })
+  /** 开始一次安装；`false` 表示这段输入不是 install 形式（或本启动没有服务）。 */
+  const startPluginInstall = (rawArgs: string): boolean => {
+    const flow = onPluginInstall?.(rawArgs, {
+      binding: () => channel.agentBindingGeneration,
+      // 回合运行中改 profile 会触发应用／HMR：门禁在流程里（inspect 之前与写入之前各查一次）。
+      busy: () => channel.working,
+      onLines: lines => channel.pushLocal('/plugin', lines),
+    })
+    if (flow === undefined) return false
+    pluginInstall.start(flow, flow.begin())
+    return true
+  }
+  /**
+   * 取消在途安装。取消由服务自己结算（回滚 profile），浮层等它回答。
+   * 「还没开始装」（confirm 步）时不该走这里：服务那边没有可取消的请求，
+   * 只会打出一行「没有在跑的安装」——那条路径直接 `pluginInstall.close()`。
+   */
+  const cancelPluginInstall = (): void => {
+    const view = pluginInstall.view
+    if (view === undefined) return
+    pluginInstall.run(view.flow.cancel())
+  }
+  /**
+   * `/plugin remove|enable|disable <target>` 的步骤态（C-5）：与装链路同一副骨架，
+   * 只有两条差异——没有 `cancelOnClose`（这三个动作服务不给取消面，写也是一次就
+   * 结算的 profile 操作，关掉浮层它照旧跑完并把结果写进转录），以及 Enter 只有
+   * 「确认」一种答案。
+   */
+  const pluginManage = usePluginWriteFlow<PluginManageStep, PluginManageFlow>({
+    overlayKind: 'plugin-manage',
+    overlay,
+    dispatchOverlay,
+    pushLocal: lines => channel.pushLocal('/plugin', lines),
+    initialStep: { kind: 'done' },
+    failureLine: error => t('plugins-manage-failed', { reason: cleanScalarText(error, COMMAND_RESULT_CELLS) }),
+  })
+  /** 绑定会话的 teammate 数、其中运行中／准备中的数与可能在运行的数（关闭团队前的确认用）。 */
+  const teamMembers = (): { total: number; active: number; unseen: number } => {
+    const team = channel.team
+    return team === undefined ? { total: 0, active: 0, unseen: 0 } : teamMemberCounts(team, [...channel.subagents], channel.sessionId)
+  }
+  /** 开始一次生命周期动作；`false` 表示这段输入不是那三种形式（或本启动没有服务）。 */
+  const startPluginManage = (rawArgs: string): boolean => {
+    const flow = onPluginManage?.(rawArgs, {
+      binding: () => channel.agentBindingGeneration,
+      // 回合运行中改 profile 会触发应用／HMR：门禁在流程里（解析之前与写入之前各查一次）。
+      busy: () => channel.working,
+      onLines: lines => channel.pushLocal('/plugin', lines),
+      teamActiveMembers: teamMembers,
+    })
+    if (flow === undefined) return false
+    pluginManage.start(flow, flow.begin())
+    return true
   }
   const host = channel.backendChannels?.()
   const { rows: channelRows, open: openChannelPicker, pick: pickChannel, setMode: runBackendModeCommand, login: runBackendLogin } = useBackendChannels({
@@ -1375,8 +1553,8 @@ export function Chat({
   }, [autoRecapSessionId])
   // The user starts a new message → the auto recap has served its purpose
   // (catching them up) and bows out. A newer user row is the signal; the
-  // assistant's own streamed rows don't count.
-  const lastUserRowId = channel.rows.filter(row => row.kind === 'user').at(-1)?.id ?? -1
+  // assistant's own streamed rows (and a teammate's message) don't count.
+  const lastUserRowId = channel.rows.filter(row => row.kind === 'user' && row.label !== 'team-message').at(-1)?.id ?? -1
   React.useEffect(() => {
     if (
       recap !== null &&
@@ -3544,6 +3722,16 @@ export function Chat({
         // grant matrix / ledger tail — or validate+negotiate for
         // `/plugin check <path>` (rawInput carries the subcommand).
         setHelpOpen(false)
+        // `/plugin install <spec>` is the one form that needs a flow of its own
+        // (C-4). Anything else — and any launch whose entry has no service to
+        // install through — falls through to the read-only report below.
+        // The three lifecycle forms (C-5) and the install form each need a flow
+        // of their own. They are mutually exclusive by their subcommand, so
+        // trying one and then the other cannot take the wrong path; anything
+        // else — and any launch whose entry has no service — falls through to
+        // the read-only report below.
+        if (startPluginManage(rawInput)) return true
+        if (startPluginInstall(rawInput)) return true
         // The bundle/row half comes from the host plugin service, so the
         // report is async (the `/agents` case reads the same way). `pushLocal`
         // writes the CURRENTLY bound session, and a resume or `/new` can land
@@ -3553,6 +3741,34 @@ export function Chat({
         void channel.pluginsInfo(rawInput).then((lines) => {
           if (channel.agentBindingGeneration !== originAgentBinding) return
           channel.pushLocal('/plugin', lines)
+        })
+        return true
+      }
+      case 'team': {
+        // `/team` 是团队 bundle 的启停（team-mode.ts）：on/off 走与 /plugin 同一个
+        // 生命周期流程与确认浮层，status 是一段报告；都按发起时的绑定落行。
+        setHelpOpen(false)
+        if (onTeamCommand === undefined) {
+          channel.pushLocal('/team', [t('team-cmd-unavailable')])
+          return true
+        }
+        const originAgentBinding = channel.agentBindingGeneration
+        const outcome = onTeamCommand(rawInput, {
+          binding: () => channel.agentBindingGeneration,
+          busy: () => channel.working,
+          onLines: lines => channel.pushLocal('/team', lines),
+          members: teamMembers,
+        })
+        if (outcome.kind === 'flow') {
+          pluginManage.start(outcome.flow, outcome.flow.begin())
+          return true
+        }
+        void outcome.lines.then((lines) => {
+          if (channel.agentBindingGeneration !== originAgentBinding) return
+          channel.pushLocal('/team', [...lines])
+        }, (error: unknown) => {
+          if (channel.agentBindingGeneration !== originAgentBinding) return
+          channel.pushLocal('/team', [t('plugins-manage-failed', { reason: cleanCommandError(error) })])
         })
         return true
       }
@@ -3713,7 +3929,7 @@ export function Chat({
           }
           const currentName = snapshot.availability === 'unavailable'
             ? t('permission-roster-unavailable')
-            : snapshot.current?.name ?? '—'
+            : currentPermissionName(snapshot) ?? '—'
           channel.pushLocal('/permission', [
             t('permission-current', { name: currentName }),
             t('permission-policy-hint'),
@@ -4955,6 +5171,16 @@ export function Chat({
       }
       return
     }
+    if (overlay.kind === 'permission' && overlay.confirm === true) {
+      if (plainReturn) {
+        permissionOverlayFocusRef.current = null
+        dispatchOverlay({ type: 'close' })
+        void runPermissionCommand(` ${PERMISSION_PRESET_AUTO}`)
+      } else if (key.escape) {
+        dispatchOverlay({ type: 'open', overlay: { ...overlay, confirm: false } })
+      }
+      return
+    }
     if (overlay.kind === 'permission') {
       if (key.upArrow || key.downArrow) {
         const currentIndex = permissionOverlayFocusRef.current?.overlay === overlay
@@ -4969,6 +5195,10 @@ export function Chat({
           : overlay.index
         const option = overlay.snapshot.options[currentIndex]
         permissionOverlayFocusRef.current = null
+        if (needsAutoConfirm(overlay.snapshot, option?.value)) {
+          dispatchOverlay({ type: 'open', overlay: { ...overlay, index: currentIndex, confirm: true } })
+          return
+        }
         dispatchOverlay({ type: 'close' })
         if (option !== undefined) void runPermissionCommand(` ${option.value}`)
       } else if (key.escape) {
@@ -5020,6 +5250,70 @@ export function Chat({
       } else {
         // pnpm-missing / cancelled / no-target：Esc 回内核选择器。
         if (key.escape) closeSdkInstallToKernelPicker()
+      }
+      return
+    }
+    if (overlay.kind === 'plugin-install') {
+      // 装链路浮层（C-4）：一次安装的每一步都是显式的——确认、批准构建脚本、
+      // 接受版本风险；取消由服务自己结算（回滚 profile），期间除 Esc 外不接键。
+      const view = pluginInstall.view
+      if (view === undefined || view.busy) {
+        if (key.escape) {
+          cancelPluginInstall()
+          event.stopImmediatePropagation()
+        }
+        return
+      }
+      if (view.step.kind === 'confirm') {
+        if (plainReturn) {
+          pluginInstall.run(view.flow.confirm())
+          event.stopImmediatePropagation()
+        } else if (key.escape) {
+          // 还没开始装：收起浮层即可，不去服务那边取消一个不存在的安装。
+          pluginInstall.close()
+          event.stopImmediatePropagation()
+        }
+      } else if (view.step.kind === 'build-blocked') {
+        if (plainReturn) {
+          pluginInstall.run(view.flow.approve(view.step.builds))
+          event.stopImmediatePropagation()
+        } else if (key.escape) {
+          pluginInstall.close()
+          event.stopImmediatePropagation()
+        }
+      } else if (view.step.kind === 'incompatible') {
+        if (plainReturn) {
+          pluginInstall.run(view.flow.acceptRisk())
+          event.stopImmediatePropagation()
+        } else if (key.escape) {
+          pluginInstall.close()
+          event.stopImmediatePropagation()
+        }
+      } else if (key.escape) {
+        pluginInstall.close()
+        event.stopImmediatePropagation()
+      }
+      return
+    }
+    if (overlay.kind === 'plugin-manage') {
+      // 生命周期浮层（C-5）：只有「确认」一种答案，写入中除 Esc 外不接键。
+      // 与装链路的关键差异是**没有取消**：这三个动作服务不提供取消面，写也是一次
+      // 就结算的 profile 操作，所以 Esc 只关面板，流程照旧跑完并把结果（仍按发起时
+      // 的 binding 加栅栏）写进转录；浮层没了就不再更新步骤态。
+      const view = pluginManage.view
+      if (view === undefined || view.busy) {
+        if (key.escape) {
+          pluginManage.close()
+          event.stopImmediatePropagation()
+        }
+        return
+      }
+      if (plainReturn) {
+        pluginManage.run(view.flow.confirm())
+        event.stopImmediatePropagation()
+      } else if (key.escape) {
+        pluginManage.close()
+        event.stopImmediatePropagation()
       }
       return
     }
@@ -5751,9 +6045,24 @@ export function Chat({
                 focusIndex={overlay.index}
                 currentValue={overlay.snapshot.current?.value}
                 cwd={channel.cwd}
+                confirming={overlay.confirm === true}
+                onConfirm={() => {
+                  if (approvalSnapshot !== null || questionSnapshot !== null || dialogSnapshot !== null) return
+                  permissionOverlayFocusRef.current = null
+                  dispatchOverlay({ type: 'close' })
+                  void runPermissionCommand(` ${PERMISSION_PRESET_AUTO}`)
+                }}
+                onCancelConfirm={() => {
+                  if (approvalSnapshot !== null || questionSnapshot !== null || dialogSnapshot !== null) return
+                  dispatchOverlay({ type: 'open', overlay: { ...overlay, confirm: false } })
+                }}
                 onPick={(index) => {
                   if (approvalSnapshot !== null || questionSnapshot !== null || dialogSnapshot !== null) return
                   const option = overlay.snapshot.options[index]
+                  if (needsAutoConfirm(overlay.snapshot, option?.value)) {
+                    dispatchOverlay({ type: 'open', overlay: { ...overlay, index, confirm: true } })
+                    return
+                  }
                   dispatchOverlay({ type: 'close' })
                   if (option !== undefined) void runPermissionCommand(` ${option.value}`)
                 }}
@@ -5791,6 +6100,16 @@ export function Chat({
           {overlay.kind === 'sdk-install' && sdkPhase.kind !== 'idle' && (
             <Box flexDirection="column" marginTop={1}>
               <SdkInstallWizard phase={sdkPhase} />
+            </Box>
+          )}
+          {overlay.kind === 'plugin-install' && pluginInstall.view !== undefined && (
+            <Box flexDirection="column" marginTop={1}>
+              <PluginInstallPane step={pluginInstall.view.step} busy={pluginInstall.view.busy} />
+            </Box>
+          )}
+          {overlay.kind === 'plugin-manage' && pluginManage.view !== undefined && (
+            <Box flexDirection="column" marginTop={1}>
+              <PluginManagePane step={pluginManage.view.step} busy={pluginManage.view.busy} />
             </Box>
           )}
           {overlay.kind === 'channel' && (
@@ -6201,6 +6520,9 @@ export function Chat({
       <BtwThreadScene
         channel={channel}
         onClose={() => setBtwSceneOpen(false)}
+        // 送聊天之后整屏场景让位：关场景 + 焦点回主输入框——与侧栏形态里
+        // 「面板留着、焦点回输入框」的落点一致（见 BtwThreadScene.sendToChat）。
+        onFocusChat={sidePanel.focusChat}
       />
     )
     return fullscreen ? scene : <AlternateScreen>{scene}</AlternateScreen>
@@ -6215,6 +6537,8 @@ export function Chat({
       <SubagentDashboard
         subagents={[...channel.subagents]}
         onViewed={acknowledgeViewedFailures}
+        team={channel.team}
+        sessionId={channel.sessionId}
         onSelect={(id) => {
           setSubagentDashboardOpen(false)
           setSubagentDetailId(id)
@@ -6276,7 +6600,7 @@ export function Chat({
     let launchpadPermission: string | undefined
     try {
       const snapshot = channel.permissionPresets()
-      launchpadPermission = snapshot.availability === 'runtime' ? snapshot.current?.name : undefined
+      launchpadPermission = snapshot.availability === 'runtime' ? currentPermissionName(snapshot) : undefined
     } catch {
       launchpadPermission = undefined
     }

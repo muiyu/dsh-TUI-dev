@@ -1,11 +1,45 @@
 import { completeCommands, isCommandCompletionToken, type CommandCompletionNode } from '../../commands.js'
 import { getSidePanelPanels, parseSidePanelIds } from '../../tuiDisplayPrefs.js'
 import { SESSION_COLOR_NAMES } from '../../terminal-utils/sessionColors.js'
-import { getLang, LANGS } from '../../i18n.js'
+import { getLang, LANGS, t } from '../../i18n.js'
+import { PERMISSION_PRESET_AUTO, permissionPresetKeys } from '../../permissionPresetLabels.js'
 import { AUTO_THEME_NAME } from '../../theme.js'
 import { listThemeCatalog } from '../../themeCatalog.js'
 import { PRESET_NAMES } from '../../components/activityFrames.js'
 import type { ChannelState } from './types.js'
+
+/**
+ * What a `/plugin install | info` spec may name — the same three shapes the
+ * README lists, in the same order. A path and a git URL cannot be enumerated,
+ * and `info` also takes a spec for a bundle that is not installed yet, so these
+ * are shown as example rows rather than discovered candidates.
+ */
+const PLUGIN_SPEC_EXAMPLES: readonly {
+  readonly spec: string
+  readonly description: string
+  readonly descriptionKey: string
+}[] = [
+  { spec: '/path/to/repo', description: 'Example: a local directory', descriptionKey: 'sugg-plugin-spec-path-desc' },
+  { spec: 'https://github.com/exam/ple.git', description: 'Example: a git URL', descriptionKey: 'sugg-plugin-spec-git-desc' },
+  { spec: '@scope/package@1.2.3', description: 'Example: a registry package, @version pins it', descriptionKey: 'sugg-plugin-spec-package-desc' },
+]
+
+/**
+ * The spec shapes as completion rows for one `/plugin` form. They carry
+ * `example` (`CommandCompletionNode`): Tab hands the draft back untouched and
+ * Enter submits the draft as typed — the bare subcommand at the empty argument
+ * position (its usage line), and the typed spec once there is one. A placeholder
+ * spec can therefore neither be written into the draft nor installed by picking
+ * its row, and a real spec that only starts like one is not swallowed.
+ */
+function pluginSpecExamples(): readonly CommandCompletionNode[] {
+  return PLUGIN_SPEC_EXAMPLES.map(shape => ({
+    name: shape.spec,
+    description: shape.description,
+    descriptionKey: shape.descriptionKey,
+    example: true,
+  }))
+}
 
 /** Owns slash completion composition and cache warming; it has no lifecycle effects. */
 export function createCommandCompletions(deps: {
@@ -71,6 +105,11 @@ export function createCommandCompletions(deps: {
         model.warmPresetOptions()
         return [{ name: 'status', description: 'Show the current agent preset', descriptionKey: 'sugg-status-desc' }, ...model.presetOptions().map(preset => ({ name: preset.id, description: preset.description ?? preset.name ?? preset.id, ...(preset.id === state.agentPreset ? { tag: 'current' } : preset.isDefault ? { tag: 'default' } : {}) }))]
       }
+      if (path.length === 1 && path[0] === 'team') return [
+        { name: 'status', description: 'Show the team mode state', descriptionKey: 'sugg-status-desc' },
+        { name: 'on', description: 'Switch Agent Teams on', descriptionKey: 'sugg-team-on-desc' },
+        { name: 'off', description: 'Switch Agent Teams off', descriptionKey: 'sugg-team-off-desc' },
+      ]
       if (path.length === 1 && path[0] === 'activity') return [
         { name: 'status', description: 'Show the current activity preset', descriptionKey: 'sugg-status-desc' },
         { name: 'frames', description: 'List or switch frame presets', descriptionKey: 'sugg-activity-frames-desc' },
@@ -92,11 +131,16 @@ export function createCommandCompletions(deps: {
       if (path.length === 1 && path[0] === 'permission') {
         const snapshot = state.permissionPresets()
         if (snapshot.options.length > 0) {
-          return snapshot.options.filter(option => isCommandCompletionToken(option.value)).map(option => ({
-            name: option.value, description: option.description ?? option.name,
-            ...(option.value === 'read-only' ? { descriptionKey: 'permission-preset-readonly-desc' } : option.value === 'workspace-write' ? { descriptionKey: 'permission-preset-workspace-write-desc' } : option.value === 'danger-full-access' ? { descriptionKey: 'permission-preset-full-access-desc' } : {}),
-            ...(snapshot.current?.kind === 'preset' && snapshot.current.value === option.value ? { tag: 'current' } : {}),
-          }))
+          return snapshot.options.filter(option => isCommandCompletionToken(option.value)).map((option) => {
+            const keys = permissionPresetKeys(option)
+            return {
+              name: option.value, description: option.description ?? option.name,
+              ...(keys === undefined ? {} : { descriptionKey: keys.description }),
+              ...(snapshot.current?.kind === 'preset' && snapshot.current.value === option.value
+                ? { tag: 'current' }
+                : option.value === PERMISSION_PRESET_AUTO ? { tag: t('permission-preset-exp-tag') } : {}),
+            }
+          })
         }
         // No preset roster (a non-DSH backend): the typed `modes` capability
         // is the roster. DSH sessions declare no such capability, so this
@@ -138,12 +182,29 @@ export function createCommandCompletions(deps: {
       if (path.length === 1 && path[0] === 'plugin') return [
         { name: 'list', description: 'List the plugins this profile added', descriptionKey: 'sugg-plugin-list-desc' },
         { name: 'info', description: 'Describe an installed plugin or an install spec', descriptionKey: 'sugg-plugin-info-desc' },
+        { name: 'install', description: 'Install a plugin bundle into this profile', descriptionKey: 'sugg-plugin-install-desc' },
+        { name: 'remove', description: 'Uninstall a plugin bundle from this profile', descriptionKey: 'sugg-plugin-remove-desc' },
+        { name: 'disable', description: 'Switch a plugin bundle or row off', descriptionKey: 'sugg-plugin-disable-desc' },
+        { name: 'enable', description: 'Switch a plugin bundle or row back on', descriptionKey: 'sugg-plugin-enable-desc' },
         { name: 'registries', description: 'Show where installations ask', descriptionKey: 'sugg-plugin-registries-desc' },
         { name: 'check', description: 'Validate a plugin manifest without installing it', descriptionKey: 'sugg-plugin-check-desc' },
       ]
-      if (path.length === 2 && path[0] === 'plugin' && path[1] === 'info') {
+      // `/plugin install <spec>` takes a spec nothing local can enumerate, so
+      // its argument position shows the shapes it accepts (`pluginSpecExamples`).
+      if (path.length === 2 && path[0] === 'plugin' && path[1] === 'install') return pluginSpecExamples()
+      // The three lifecycle forms take the same installed list as `info`: what
+      // they act on is what the profile holds, and an absent service answers an
+      // empty list rather than a throw.
+      if (path.length === 2 && path[0] === 'plugin'
+        && (path[1] === 'remove' || path[1] === 'enable' || path[1] === 'disable')) {
         deps.plugin?.warmPluginNames()
         return deps.plugin?.pluginNames() ?? []
+      }
+      // `info` reads an installed bundle OR a spec about to be installed, so it
+      // offers both: what the profile holds first, then the spec shapes.
+      if (path.length === 2 && path[0] === 'plugin' && path[1] === 'info') {
+        deps.plugin?.warmPluginNames()
+        return [...(deps.plugin?.pluginNames() ?? []), ...pluginSpecExamples()]
       }
       return commandTrees?.children(path) ?? []
     })

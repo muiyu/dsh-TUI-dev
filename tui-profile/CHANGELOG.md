@@ -5,6 +5,30 @@
 口径见 [`governance/rules.md`](governance/rules.md)），因此没有单独的审批或晋级流程，
 登记的是 profile 的变化而不是 dsh-TUI 产品的全部变更。
 
+## 2026-10-17（D-2：安装执行器的取值语义成文）
+
+### Documented（不改坐标，无破坏性变更）
+
+- [准入与开发指南](docs/plugin-admission-and-development.md)接缝十四写明 `install` 的语义：
+  **执行器是宿主实现的表**——宿主不认识的执行器读作「没有安装面」（bundle 照常注册、配方原样
+  保留、那一行不开向导），**不是拒绝**；不写 `install` 是一等公民（系统 CLI 形态）；取值集合
+  只增不删。`TUI-BACKEND-001` 同处记下「未知执行器不写反例」的理由与宿主侧的承重门禁。
+- [说明 0009](notes/0009-backend-contribution.md)「Install surface」记下 D-2 的决定：**暂不加
+  第二个执行器**——生态侧 42 条收录里第三方 `Backend` 声明为 0、也没有一条声明 `install` 配方
+  （2026-10-17 复核），没有真消费者、也没有可观察的需求形状；生态里的非 npm 分发（tarball /
+  git / 本地目录）走的是**插件管理器**那条路（`/plugin install`），与本表无关；将来加取值属
+  「只增不删」。
+
+本轮只改文档：协议正文、契约 profile 与 `profileHash` 均未变。
+
+## 2026-10-15（接缝七新增实验面：preset 内的行）
+
+### Added（实验性，不在冻结范围）
+
+- [准入与开发指南](docs/plugin-admission-and-development.md)接缝七新增「preset 内的行」：
+  bundle 用 `@deepseek-harness-tui/dsh-tui/preset-patch` 行替换 dsh-TUI 注册的 agent preset
+  里某一行的 `config`（按 id，含嵌套 group）。
+
 ## 2026-10-12（**发布第一版 apiVersion**：`tui.dsh/v1alpha1` 公开面冻结）
 
 > 这一段就是 roadmap §6 第 5 条的**冻结动作**（Stage C / C-2）。逐条口径见

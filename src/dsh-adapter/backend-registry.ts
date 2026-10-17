@@ -27,7 +27,7 @@ import type { AgentBackend } from '../agent/backend.js'
 import { isBackendIdSyntax, type BackendEntry, type BackendManifest } from '../agent/backend-manifest.js'
 import { BACKEND_CAPABILITY_NAMES } from '../adapter/spec/backend-capabilities.js'
 import { EXPECTED_PERMISSIONS } from '../adapter/spec/protocol-constants.js'
-import { validateBackendSpec } from '../adapter/spec/tui-contributions.js'
+import { assertBackendHandler, validateBackendSpec } from '../adapter/spec/tui-contributions.js'
 import { cleanRenderText } from '../channel/sanitize.js'
 import { BUILTIN_BACKEND_IDS, type KernelBackendId } from '../kernelPrefs.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -159,12 +159,18 @@ export function registerBackend(entry: BackendEntry): void {
   if (!isBackendIdSyntax(manifest.id)) {
     throw new Error(`${where} has an invalid id (lowercase letters, digits and dashes, at most 32 characters)`)
   }
-  if (entries.has(manifest.id)) throw new Error(`${where} is already registered`)
+  // The reserved check comes first on purpose (D-1). Every built-in id is seeded
+  // before any other caller can run, so an "is it taken?" test would answer for a
+  // plugin wearing `claude` too — and it would name the wrong reason: the id is
+  // not taken by a rival, it is one this host owns and no declaration may wear
+  // (`BACKEND_ID_RESERVED` in the family's contract). Registration is the last
+  // place that can still tell the two apart.
   if (!manifest.inTree && (BUILTIN_BACKEND_IDS as readonly string[]).includes(manifest.id)) {
     // `dsh` refs serialize without a prefix (`formatSessionRef`), so a plugin
     // wearing that id would collide with first-party references.
     throw new Error(`${where} is a reserved built-in id`)
   }
+  if (entries.has(manifest.id)) throw new Error(`${where} is already registered`)
   if (!manifest.inTree && manifest.label.kind === 'key') {
     // Otherwise a plugin could claim a first-party name: `t()` returns the text
     // of an existing key (`src/i18n.ts`), so the row would read "DeepSeek Harness".
@@ -328,6 +334,9 @@ export function backendLabel(id: string): string {
 export async function loadBackend(id: KernelBackendId): Promise<AgentBackend> {
   const entry: RegisteredBackend | undefined = entries.get(id)
   if (entry === undefined) throw new Error(`dsh-tui: backend "${id}" is not registered`)
+  if (entry.admission.decision === 'waiting_authorization') {
+    throw new Error(`dsh-tui: backend "${id}" cannot load: ${entry.admission.reasonCode} (${entry.admission.deniedPermissions.join(', ')})`)
+  }
   if (entry.load === undefined) throw new Error(`dsh-tui: backend "${id}" has no loader (only the DSH kernel is not an AgentBackend)`)
   const module = await entry.load()
   const { backendExport, unloadExport } = entry.manifest
@@ -342,6 +351,14 @@ export async function loadBackend(id: KernelBackendId): Promise<AgentBackend> {
   const exportName = backendExport ?? 'backend'
   const backend = module[exportName]
   if (backend === undefined) throw new Error(`dsh-tui: backend "${id}" does not export "${exportName}"`)
+  // Book the imported module's pool above even when its handler is invalid.
+  // No caller may prepare a session or data directory under another backend id.
+  try {
+    assertBackendHandler(backend)
+  } catch (error) {
+    throw new Error(`dsh-tui: backend "${id}" has an invalid handler (${error instanceof Error ? error.message : String(error)})`, { cause: error })
+  }
+  if (backend.id !== id) throw new Error(`dsh-tui: backend "${id}" exports a handler for ${JSON.stringify(backend.id)}`)
   return backend as AgentBackend
 }
 

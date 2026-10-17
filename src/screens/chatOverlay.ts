@@ -66,7 +66,8 @@ export type ChatOverlay =
   | { kind: 'effort'; index: number }
   | { kind: 'preset'; index: number }
   | { kind: 'theme'; index: number }
-  | { kind: 'permission'; index: number; snapshot: PermissionPresetSnapshot }
+  /** `confirm`: the `auto` risk confirmation replaces the list. */
+  | { kind: 'permission'; index: number; snapshot: PermissionPresetSnapshot; confirm?: boolean }
   /** /permission over a backend's native permission modes (the typed
    * modes capability; a DSH session answers none and keeps the preset
    * variant above). The frozen mode list and the live current id ride the
@@ -85,6 +86,17 @@ export type ChatOverlay =
    *
    *  `foundCli` 携带检测的 hint 原文；确认面板只展示首行之后的注记。 */
   | { kind: 'sdk-install'; backendId: KernelBackendId; foundCli?: string }
+  /** `/plugin install <spec>` 的装前决策（C-4）：装前提醒、信任确认、以及
+   *  两个「再决定」步骤（构建脚本批准 / 版本豁免）。
+   *
+   *  不冻任何东西：要装什么、服务怎么答、pnpm 进度到哪，全在流程自己的步骤态
+   *  与转录里（同样按头注释第 3 条留在 Chat.tsx）。本 variant 只表示「有一个
+   *  安装浮层开着」，因此键分派与渲染都不需要额外字段。 */
+  | { kind: 'plugin-install' }
+  /** `/plugin remove | enable | disable` 的生命周期确认（C-5）：与装链路同一个
+   *  写入骨架（`usePluginWriteFlow`），同样不冻任何东西——目标是什么、要问什么、
+   *  服务怎么答，全在流程的步骤态与转录里。 */
+  | { kind: 'plugin-manage' }
   | { kind: 'plan'; index: number }
   | { kind: 'lang'; index: number }
   /** `/panel` 无参的选择器：列出「已启用 ∩ 已注册」的面板（含插件）。 */

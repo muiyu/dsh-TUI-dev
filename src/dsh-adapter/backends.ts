@@ -1,11 +1,10 @@
 /** Non-DSH backend loading, detection and startup session ownership. */
 import type { Context } from '@deepseek-ai/cordis'
-import { join } from 'node:path'
 import type { AgentBackend, BackendHost, OAuthCredentialSource, OpenTarget, SdkInstallSurface, SdkInstallTarget, SdkInstaller } from '../agent/backend.js'
 import type { AgentEvent } from '../agent/events.js'
 import type { AgentSession } from '../agent/session.js'
 import { formatSessionRef } from '../agent/refs.js'
-import { getBackend, listBackends, loadBackend } from './backend-registry.js'
+import { getBackend, listOfferedBackends, loadBackend } from './backend-registry.js'
 import type { KernelStatus } from '../components/kernelCatalog.js'
 import { reserveMount, reserveNewSession } from '../sessionMounts.js'
 import { resumeTargetFromArgv } from '../sessionHistory.js'
@@ -13,7 +12,7 @@ import { mountFailureText } from '../sessions/resumeFailure.js'
 import { getLang } from '../i18n.js'
 import { installedTuiVersion } from '../update.js'
 import { logForDebugging } from '../utils/debug.js'
-import { DATA_DIR } from '../utils/paths.js'
+import { backendDataDir } from '../utils/paths.js'
 import { installExecutor } from './install/executors.js'
 import { fileChannelTokens } from '../backends/shared/channel-tokens.js'
 
@@ -62,7 +61,7 @@ export async function createBackendHost(ctx: Context, backendId: string, cwd: st
   const appVersion = installedTuiVersion()
   return {
     cwd,
-    dataDir: join(DATA_DIR, 'backends', backendId),
+    dataDir: backendDataDir(backendId),
     locale: () => getLang(),
     ...(appVersion === undefined ? {} : { appVersion }),
     debug: message => logForDebugging(message),
@@ -165,7 +164,7 @@ export async function openBackendStartup(ctx: Context, backend: AgentBackend, in
  */
 export async function probeKernels(ctx: Context, cwd: string): Promise<Record<string, KernelStatus>> {
   const statuses: Record<string, KernelStatus> = {}
-  for (const entry of listBackends()) {
+  for (const entry of listOfferedBackends()) {
     if (entry.load === undefined) continue
     // One host per entry: `dataDir` is backend-scoped, and a probe must not
     // hand a backend a directory that is not its own.

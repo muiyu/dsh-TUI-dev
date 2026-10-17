@@ -9,7 +9,7 @@
 export const HOST_PACKAGE = '@deepseek-ai/dsh'
 
 /** The host line the reproduced pieces were checked against (host-replica.snapshot.json). */
-export const HOST_REPLICA_VERSION = '0.2.0-rc.2'
+export const HOST_REPLICA_VERSION = '0.2.1-rc.2'
 
 /** Where the entry resolves a host module from. */
 export type HostModuleVia =
@@ -91,7 +91,7 @@ export const HOST_REPLICAS: readonly HostReplica[] = [
   { id: 'process-shutdown-timeout', package: HOST_PACKAGE, symbol: 'PROCESS_SHUTDOWN_TIMEOUT_MS', kind: 'const', local: 'process-exit.ts PROCESS_SHUTDOWN_TIMEOUT_MS' },
   { id: 'app-ready', package: HOST_PACKAGE, symbol: 'createAppReady', kind: 'function', local: 'createAppReady' },
   { id: 'compose-profile', package: HOST_PACKAGE, symbol: 'composeProfile', kind: 'function', local: 'prepareHostRoot steps 1–2 (no overlays, no resolvedProfile)' },
-  { id: 'run-profile', package: HOST_PACKAGE, symbol: 'runProfile', kind: 'function', local: 'prepareHostRoot steps 3, 5–7 (proxy, fail-loud, profileContext, launch environment, PluginPackages, provideCmdline) and HostRoot.compose\'s appReady.commit' },
+  { id: 'run-profile', package: HOST_PACKAGE, symbol: 'runProfile', kind: 'function', local: 'prepareHostRoot (PluginPackages), HostRoot.selectKernel (proxy, fail-loud, profileContext, launch environment, provideCmdline) and HostRoot.compose\'s appReady.commit' },
   { id: 'boot', package: '@deepseek-ai/dsh-app-boot', symbol: 'boot', kind: 'function', local: 'prepareHostRoot step 4 (baseUrl, dshHomePath, internal/update, Loader) and HostRoot.compose (startup-log exporter, mountRootInclude, loader.await, auditStartupEntries, StartupError.startup)' },
   { id: 'startup-report', package: HOST_PACKAGE, symbol: 'reportStartupFailure', kind: 'function', local: 'writeStartupReport: the file half' },
   { id: 'run-cli', package: HOST_PACKAGE, symbol: 'runCli', kind: 'function', local: 'prepareHostRoot\'s loadLayeredEnv call before the profile; the StartupError-only report' },
@@ -108,4 +108,5 @@ export const HOST_DEVIATIONS: readonly { readonly id: string; readonly what: str
   { id: 'defer-root-guard', what: 'deferRootCapabilityGuard(root) (host-access.ts) keeps the TUI\'s root-capability guard off while the screen mounts; armRootCapabilityGuard then lets the first TUI row activation install it, as on the profile path, and the composition\'s settling installs it if no TUI row activated' },
   { id: 'report-exclude-network', what: 'host-entry.ts sets process.report.excludeNetwork = true for the process: DSH\'s flock libc probe (process.report.getReport) otherwise blocked ~10s on reverse lookups of sockets the mounted screen already opened' },
   { id: 'hijack-before-tui', what: 'the host\'s PluginPackages resolution is installed before any TUI module loads, for both kernels; runProfile installs it inside boot()\'s prepare' },
+  { id: 'kernel-after-discovery', what: 'prepareHostRoot first supplies only the neutral Loader/resolution root; after backend assembly, HostRoot.selectKernel prepares DSH-only proxy, failure handlers and services from the same final kernel the entry uses for its slot and composition' },
 ]

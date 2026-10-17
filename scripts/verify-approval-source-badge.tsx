@@ -88,6 +88,22 @@ const replay = await parkedSnapshot(approvalRequest('call-done', events('call-do
 assert.equal(replay!.external, true, 'a callId that already has a tool/result must be marked external')
 assert.equal(replay!.command, 'rm -rf /tmp/real-command')
 
+// ── displayReason：按界面语言取本地化原因，缺失时回落 en / reason ──────
+{
+  const localized = (displayReason: unknown) => ({
+    ...(approvalRequest('call-live', events('call-live')) as object),
+    reason: 'Auto review denied tool "Bash": risky',
+    displayReason,
+  }) as never
+  setLang('zh')
+  assert.equal((await parkedSnapshot(localized({ en: 'risky', zh: '有风险' })))!.reason, '有风险', 'zh picks displayReason.zh')
+  assert.equal((await parkedSnapshot(localized({ en: 'risky' })))!.reason, 'risky', 'a missing language falls back to en')
+  assert.equal((await parkedSnapshot(localized('not a record')))!.reason, 'Auto review denied tool "Bash": risky', 'a malformed displayReason falls back to reason')
+  setLang('en')
+  assert.equal((await parkedSnapshot(localized({ en: 'risky', zh: '有风险' })))!.reason, 'risky', 'en picks displayReason.en')
+  assert.equal((await parkedSnapshot(approvalRequest('call-live', events('call-live'))))!.reason, '需要删除临时文件', 'no displayReason keeps reason')
+}
+
 // ── 无 callId / 未知 callId：external 标记 ────────────────────────────
 const callless = await parkedSnapshot(approvalRequest(undefined, events('call-live')))
 assert.equal(callless!.external, true, 'a request without a callId is not from a live tool call')

@@ -565,6 +565,105 @@ await root.fiber.dispose()
   check('host code still uses the root after the guard is installed', tryRoot(entryRoot) === 'allowed')
   await entryRoot.fiber.dispose()
 }
+
+// DSH's agent-team service registers its projection through
+// `ctx.root.sessionProjections`. Behind the installed guard that call rides
+// the calling plugin's fiber (unloading it drops the key), while the root's
+// own effect stays refused. Real registry, mounted before the guard (the
+// profile's base row, the usual order) and after it.
+for (const order of ['registry first', 'guard first'] as const) {
+  const { armRootCapabilityGuard, compositionRoot, concreteService, deferRootCapabilityGuard } = await import('../src/dsh-adapter/host-access.js')
+  const { SessionProjectionRegistry } = await import('@deepseek-ai/dsh-session-projection')
+  const teamRoot = new Context()
+  const release = deferRootCapabilityGuard(teamRoot)
+  compositionRoot(teamRoot)
+  armRootCapabilityGuard(teamRoot)
+  if (order === 'registry first') await teamRoot.plugin(SessionProjectionRegistry)
+  await teamRoot.plugin({ name: 'tui-row', apply(ctx: Context) { compositionRoot(ctx) } })
+  release()
+  if (order === 'guard first') await teamRoot.plugin(SessionProjectionRegistry)
+  const definition = { key: 'agentTeamProbe', stateSchema: {}, init: () => 0, apply: (state: number) => state, stateVersion: 0 }
+  const registry = concreteService((teamRoot as unknown as { sessionProjections: object }).sessionProjections) as { registrations: Map<string, unknown> }
+  const outcome: Record<string, string> = {}
+  const teamFiber = teamRoot.plugin({
+    name: 'agent-team',
+    apply(ctx: Context) {
+      try {
+        // No outer effect: only the caller's fiber can drop the key on unload.
+        ;(ctx.root as unknown as { sessionProjections: { register(def: unknown): () => void } }).sessionProjections.register(definition)
+        outcome.register = 'allowed'
+      } catch (error) {
+        outcome.register = error instanceof Error ? error.message : String(error)
+      }
+      try {
+        ctx.root.effect(() => () => {})
+        outcome.rootEffect = 'allowed'
+      } catch (error) {
+        outcome.rootEffect = error instanceof Error && error.message.includes('unavailable from a plugin activation') ? 'denied' : String(error)
+      }
+    },
+  })
+  await teamFiber
+  check(`${order}: root projection registration from a plugin is admitted`, outcome.register === 'allowed', JSON.stringify(outcome))
+  check(`${order}: admitted projection registration is live`, registry.registrations.has('agentTeamProbe'))
+  check(`${order}: root.effect itself stays refused to the plugin`, outcome.rootEffect === 'denied', JSON.stringify(outcome))
+  await teamFiber.dispose()
+  check(`${order}: unloading the plugin drops its projection key`, !registry.registrations.has('agentTeamProbe'))
+
+  // TeamService's own shape: the registration inside an outer effect whose
+  // async disposer still reads the key before unregistering it. A sibling
+  // effect on the plugin's fiber would drop the key mid-teardown.
+  const teardown: string[] = []
+  const ordered = teamRoot.plugin({
+    name: 'agent-team-ordered',
+    apply(ctx: Context) {
+      ctx.effect(() => {
+        const disposeProjection = (ctx.root as unknown as { sessionProjections: { register(def: unknown): () => void } }).sessionProjections.register(definition)
+        return async () => {
+          try {
+            await (async () => {})()
+            teardown.push(registry.registrations.has('agentTeamProbe') ? 'present' : 'gone')
+          } finally {
+            disposeProjection()
+          }
+        }
+      }, 'agentTeams.runtimeLifecycle()')
+    },
+  })
+  await ordered
+  await ordered.dispose()
+  check(`${order}: the key stays readable through the plugin's async teardown`, teardown.join() === 'present', teardown.join())
+  check(`${order}: and goes once that teardown unregisters it`, !registry.registrations.has('agentTeamProbe'))
+
+  // A reload releases the old registration before the new one lands.
+  const reloading = teamRoot.plugin({
+    name: 'agent-team-reload',
+    apply(ctx: Context) {
+      ;(ctx.root as unknown as { sessionProjections: { register(def: unknown): () => void } }).sessionProjections.register(definition)
+    },
+  }, { generation: 1 })
+  await reloading
+  reloading.update({ generation: 2 })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  const refs = (registry.registrations.get('agentTeamProbe') as { refs?: number } | undefined)?.refs
+  check(`${order}: a reload holds one registration, not two`, refs === 1, String(refs))
+  await reloading.dispose()
+  check(`${order}: unloading the reloaded plugin drops the key`, !registry.registrations.has('agentTeamProbe'))
+
+  // An activation that throws after registering leaves nothing behind.
+  const failing = teamRoot.plugin({
+    name: 'agent-team-failing',
+    apply(ctx: Context) {
+      ;(ctx.root as unknown as { sessionProjections: { register(def: unknown): () => void } }).sessionProjections.register(definition)
+      throw new Error('activation failed')
+    },
+  })
+  await Promise.resolve(failing).catch(() => undefined)
+  await new Promise(resolve => setTimeout(resolve, 20))
+  check(`${order}: a failed activation leaves no projection key`, !registry.registrations.has('agentTeamProbe'))
+  await failing.dispose()
+  await teamRoot.fiber.dispose()
+}
 if (failures > 0) {
   console.error(`plugin lifecycle battery FAILED (${failures}/${checks})`)
   process.exit(1)

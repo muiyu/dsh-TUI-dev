@@ -5,6 +5,7 @@ import { t } from '../i18n.js'
 import { jobOutputRows } from './Chat/JobCard.js'
 import { isMinimalUiMode } from '../minimalUiMode.js'
 import type { ClickEvent } from '../ink/events/click-event.js'
+import type { TeamMemberStatus } from './teamRoster.js'
 
 function formatDuration(ms: number): string {
   const seconds = Math.floor(ms / 1000)
@@ -16,11 +17,27 @@ export interface SubagentCardProps {
   focused?: boolean
   onClick?(event: ClickEvent): void
   variant?: 'default' | 'panel'
+  /** Agent Teams: the row is this teammate — its name replaces the
+   *  description and its member state replaces the run status. */
+  teamMember?: { readonly name: string; readonly status: TeamMemberStatus }
 }
 
-export function SubagentCard({ subagent, focused, onClick, variant = 'default' }: SubagentCardProps): React.ReactNode {
+/** Status glyph and color of a team member (`·`-style in minimal UI). */
+export function teamStatusGlyph(status: TeamMemberStatus, minimalUi: boolean): { readonly glyph: string; readonly color?: 'warning' | 'subtle' | 'error' | 'accent' } {
+  switch (status) {
+    case 'running': return minimalUi ? { glyph: '·' } : { glyph: '🟡', color: 'warning' }
+    case 'idle': return minimalUi ? { glyph: '○' } : { glyph: '🔵', color: 'accent' }
+    case 'active': return minimalUi ? { glyph: '◇' } : { glyph: '🟣', color: 'accent' }
+    case 'provisioning': return minimalUi ? { glyph: '…' } : { glyph: '⚪', color: 'subtle' }
+    case 'failed': return minimalUi ? { glyph: '×' } : { glyph: '🔴', color: 'error' }
+  }
+}
+
+export function SubagentCard({ subagent, focused, onClick, variant = 'default', teamMember }: SubagentCardProps): React.ReactNode {
   const panelMode = variant === 'panel'
-  const running = subagent.status === 'running' || subagent.status === 'starting'
+  const running = teamMember !== undefined
+    ? teamMember.status === 'running'
+    : subagent.status === 'running' || subagent.status === 'starting'
   const [clockRef] = useAnimationFrame(running ? 1000 : null)
   // Unknown rows have no completion time, so they do not get a fabricated duration.
   const elapsed = running
@@ -35,11 +52,14 @@ export function SubagentCard({ subagent, focused, onClick, variant = 'default' }
   const [hovered, setHovered] = useState(false)
   const liveLine = running ? subagent.output[subagent.output.length - 1] : undefined
   const minimalUi = isMinimalUiMode()
-  const glyph = running ? (minimalUi ? '·' : '🟡')
+  const teamGlyph = teamMember === undefined ? undefined : teamStatusGlyph(teamMember.status, minimalUi)
+  const glyph = teamGlyph !== undefined ? teamGlyph.glyph
+    : running ? (minimalUi ? '·' : '🟡')
     : subagent.status === 'unknown' ? (minimalUi ? '·' : '⚪')
     : subagent.status === 'failed' || subagent.status === 'cancelled' ? (minimalUi ? '×' : '🔴')
     : (minimalUi ? '✓' : '🟢')
-  const glyphColor = minimalUi ? undefined
+  const glyphColor = teamGlyph !== undefined ? teamGlyph.color
+    : minimalUi ? undefined
     : running ? 'warning' as const
     : subagent.status === 'unknown' ? 'subtle' as const
     : subagent.status === 'failed' || subagent.status === 'cancelled' ? 'error' as const
@@ -76,14 +96,19 @@ export function SubagentCard({ subagent, focused, onClick, variant = 'default' }
         <Text color={glyphColor}>{glyph}</Text>
       </Box>
       <Box flexGrow={1} flexShrink={1} overflow="hidden">
-        <Text bold color={focused ? 'accent' : undefined} wrap="truncate-end">{panelMode ? subagent.description : `${t('subagent-card-prefix')}${subagent.description}`}</Text>
+        <Text bold color={focused ? 'accent' : undefined} wrap="truncate-end">{teamMember !== undefined ? teamMember.name : panelMode ? subagent.description : `${t('subagent-card-prefix')}${subagent.description}`}</Text>
       </Box>
-      {subagent.mode === 'continuable' && (
+      {teamMember !== undefined && (
+        <Box flexShrink={0} marginLeft={1}>
+          <Text color={focused ? 'accent' : teamGlyph?.color} dimColor={teamMember.status === 'provisioning'}>{t(`team-status-${teamMember.status}`)}</Text>
+        </Box>
+      )}
+      {teamMember === undefined && subagent.mode === 'continuable' && (
         <Box flexShrink={0} marginLeft={1}>
           <Text color={focused ? 'accent' : 'warning'}>{t('subagent-mode-continuable')}</Text>
         </Box>
       )}
-      {subagent.mode === 'one-shot' && (
+      {teamMember === undefined && subagent.mode === 'one-shot' && (
         <Box flexShrink={0} marginLeft={1}>
           <Text dimColor>{t('subagent-mode-one-shot')}</Text>
         </Box>

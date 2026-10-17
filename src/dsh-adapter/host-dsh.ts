@@ -249,6 +249,12 @@ export async function loadHostDsh(packageDir: string | undefined = undefined): P
 export interface HostRoot {
   readonly ctx: Context
   /**
+   * Select the final kernel after the Loader is available and third-party
+   * backends have been assembled. This must happen before the runtime applies
+   * and before the root composes its profile.
+   */
+  selectKernel(dsh: boolean): Promise<void>
+  /**
    * The dsh-tui profile (DSH kernel) or the light profile (./lite-profile.ts).
    * Rejects with the Loader's or the audit's error; the tree stays up.
    * `stopping`: a root dispose is waiting, so skip audit and readiness.
@@ -260,14 +266,14 @@ export interface HostRoot {
    * would exit before the funnel restored the terminal.
    */
   readonly uninstallFailLoud: () => void
+  /** The host's DSH runtime version (`unknown` when it reports none). */
+  readonly kernelVersion: string
 }
 
 export interface PrepareHostRootOptions {
   readonly profile: string
   /** `ctx.cmdlineArgs`. */
   readonly args: readonly string[]
-  /** Compose the profile later (the DSH kernel); else only the resolution. */
-  readonly dsh: boolean
   /** Routes `ctx.appExit(code)` to the TUI's exit funnel; the bounded `shutdown` when unfilled or refused. */
   readonly exitSeam?: ProcessExitSeam
 }
@@ -289,12 +295,9 @@ export async function prepareHostRoot(host: HostDsh, options: PrepareHostRootOpt
   const profile = profileBoot.prepareProfile(options.profile, true, undefined)
   const resolution = await appBoot.createRuntimeResolution({ installAnchor: profileBoot.INSTALL_ANCHOR, profile })
   const rootConfig = join(profile.dir, profileBoot.PROFILE_ROOT_FILENAME)
-  // 3. Proxy policy (DSH kernel only).
-  const disposeProxy = options.dsh
-    ? await host.httpProxy.installProxyFromEnvironment(environment, message => { process.stderr.write(`${BIN_NAME}: ${message}\n`) })
-    : undefined
+  // Build the neutral Loader root first: discovery needs its resolver before
+  // the final kernel can decide whether DSH-only preparation is appropriate.
   const ctx = new host.Context()
-  if (disposeProxy !== undefined) ctx.effect(() => () => { void Promise.resolve(disposeProxy()).catch(() => undefined) }, 'dsh-tui host proxy')
   // 4. boot() prelude, both kernels: the light profile's patch expressions read
   // `dshHomePath` and resolve bare package names against `baseUrl`.
   ;(ctx as Context & { baseUrl?: string }).baseUrl = pathToFileURL(dirname(rootConfig)).href + '/'
@@ -319,33 +322,45 @@ export async function prepareHostRoot(host: HostDsh, options: PrepareHostRootOpt
     telemetryDisabledEnv: process.env.DSH_TELEMETRY_DISABLED,
   })
   let profileContext: AppBoot.ProfileContext | undefined
-  if (options.dsh) {
-    // 5. runProfile: fail-loud (removable here, unlike runProfile's).
-    uninstallFailLoud = appBoot.installFailLoud(BIN_NAME, process, async () => { await ctx.fiber.dispose() })
-    profileContext = profileContextFor(profile.layers.map(layer => layer.packageName))
-    ctx.provide('profileContext', profileContext)
-    ctx.provide(host.launchEnvironmentKey, environment)
-  }
+  let kernelSelected = false
   try {
-    // 6. The resolution hijack (both kernels).
+    // 6. The resolution hijack (both kernels), before any TUI module loads.
     await ctx.plugin(appBoot.PluginPackages as never, { resolution } as never)
-    // 7. App arguments and the exit / readiness seams.
-    if (options.dsh) {
-      host.cmdline.provideCmdline(ctx, {
-        args: options.args,
-        exit: code => {
-          const answer = options.exitSeam?.request?.({ kind: 'code', code }) ?? 'refused'
-          if (answer === 'refused') void shutdown(code)
-        },
-        ready: appReady.service,
-      })
-    }
   } catch (error) {
     // The caller falls back to another launch path in this same process:
     // leave nothing of this root behind (runProfile disposes on failure too).
-    uninstallFailLoud()
     await ctx.fiber.dispose().catch(() => undefined)
     throw error
+  }
+  const selectKernel = async (dsh: boolean): Promise<void> => {
+    if (kernelSelected) throw new Error('dsh-tui: the host kernel was already selected')
+    // A light profile needs none of runProfile's DSH-only services. The entry
+    // uses the same final answer for its slot and for this composition mode.
+    try {
+      if (dsh) {
+        const disposeProxy = await host.httpProxy.installProxyFromEnvironment(environment, message => { process.stderr.write(`${BIN_NAME}: ${message}\n`) })
+        if (disposeProxy !== undefined) ctx.effect(() => () => { void Promise.resolve(disposeProxy()).catch(() => undefined) }, 'dsh-tui host proxy')
+        // 5. runProfile: fail-loud (removable here, unlike runProfile's).
+        uninstallFailLoud = appBoot.installFailLoud(BIN_NAME, process, async () => { await ctx.fiber.dispose() })
+        profileContext = profileContextFor(profile.layers.map(layer => layer.packageName))
+        ctx.provide('profileContext', profileContext)
+        ctx.provide(host.launchEnvironmentKey, environment)
+        // 7. App arguments and the exit / readiness seams.
+        host.cmdline.provideCmdline(ctx, {
+          args: options.args,
+          exit: code => {
+            const answer = options.exitSeam?.request?.({ kind: 'code', code }) ?? 'refused'
+            if (answer === 'refused') void shutdown(code)
+          },
+          ready: appReady.service,
+        })
+      }
+      kernelSelected = true
+    } catch (error) {
+      uninstallFailLoud()
+      await ctx.fiber.dispose().catch(() => undefined)
+      throw error
+    }
   }
   const mountAndAudit = async (patches: ReturnType<typeof appBoot.readProfilePatches>, warn: Warn, stopping: () => boolean): Promise<void> => {
     // boot(): warnings and errors logged while the tree starts, for the startup report.
@@ -386,8 +401,11 @@ export async function prepareHostRoot(host: HostDsh, options: PrepareHostRootOpt
   }
   return {
     ctx,
+    selectKernel,
     uninstallFailLoud: () => { uninstallFailLoud() },
+    kernelVersion: hostVersion(host),
     async compose(warn, stopping = () => false) {
+      if (!kernelSelected) throw new Error('dsh-tui: select the host kernel before composing its profile')
       if (profileContext !== undefined) {
         await mountAndAudit(appBoot.readProfilePatches(BIN_NAME, profileContext, profile), warn, stopping)
         return
@@ -428,7 +446,7 @@ function hostVersion(host: HostDsh): string {
 }
 
 /**
- * dsh `bin.js` reportStartupFailure (0.2.0-rc.2), the file half only: the
+ * dsh `bin.js` reportStartupFailure (0.2.1-rc.2), the file half only: the
  * screen is up, so never stderr. Undefined when it could not be written.
  */
 async function writeStartupReport(error: unknown, context: {
@@ -469,7 +487,7 @@ async function writeStartupReport(error: unknown, context: {
   return logPath
 }
 
-/** dsh `profile-boot` createAppReady (0.2.0-rc.2). */
+/** dsh `profile-boot` createAppReady (0.2.1-rc.2). */
 function createAppReady(): { readonly service: AppReadyService; commit(): void } {
   let ready = false
   const listeners = new Set<() => void>()
@@ -493,7 +511,7 @@ function createAppReady(): { readonly service: AppReadyService; commit(): void }
   }
 }
 
-/** dsh `profile-boot` createProcessShutdown (0.2.0-rc.2), the `shutdown` half only. */
+/** dsh `process-shutdown` createProcessShutdown (0.2.1-rc.2), the `shutdown` half only. */
 function createProcessShutdown(dispose: () => Promise<unknown>, timeoutMs = PROCESS_SHUTDOWN_TIMEOUT_MS): (code: number) => Promise<void> {
   let pending: Promise<void> | undefined
   let settled = false

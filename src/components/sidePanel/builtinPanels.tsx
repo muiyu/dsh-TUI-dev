@@ -168,8 +168,14 @@ function AgentsPanelAdapter({ focused, visible }: PanelProps): React.ReactNode {
   const readVersion = React.useSyncExternalStore(subagentFailureReads.subscribe, subagentFailureReads.getVersion)
   React.useEffect(() => {
     const running = subagents.filter(s => s.status === 'running' || s.status === 'starting').length
+
+    // Team members that failed but aren't already tracked in the subagent roster.
+    const teamFailedCount = (channel.team?.members ?? [])
+      .filter(m => m.phase === 'failed' && !subagents.some(s => s.agentId === m.id))
+      .length
     if (visible) subagentFailureReads.acknowledge(channel, sessionId, subagents)
-    const unread = subagentFailureReads.unread(channel, sessionId, subagents)
+    const unread = subagentFailureReads.unread(channel, sessionId, subagents) + (visible ? 0 : teamFailedCount)
+
     panelStore.setBadge(
       'agents',
       unread > 0 ? { level: 'error', unread } : running > 0 ? { level: 'info', unread: 0 } : null,
@@ -203,6 +209,8 @@ function AgentsPanelAdapter({ focused, visible }: PanelProps): React.ReactNode {
   return (
     <SubagentDashboard
       subagents={subagents}
+      team={channel.team}
+      sessionId={channel.sessionId}
       variant="panel"
       focused={focused}
       visible={visible}

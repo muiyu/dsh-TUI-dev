@@ -43,6 +43,10 @@ reference**, not a promise:
 Also an experimental public surface:
 
 - `@deepseek-harness-tui/dsh-tui/api` (types-only entry).
+- **Rows inside a preset (experimental, seam VII)**: a bundle changes the `config` of a row
+  inside a preset dsh-TUI registers (for example, turning off `standard`'s
+  `compaction-basic` auto-compaction) with a `@deepseek-harness-tui/dsh-tui/preset-patch` row;
+  see seam VII of the [admission and development guide](../tui-profile/docs/plugin-admission-and-development.md).
 - **Side panels (experimental, §18)**: `ctx.tuiPanels.register({ apiVersion:
   1, id, title, icon?, component | compact })` registers a right-sidebar
   panel (the host prefixes `<pluginId>:`; ≤4 panels per plugin, ≤32 globally;
@@ -59,11 +63,68 @@ Also an experimental public surface:
 - **The backend contribution family (`tui.dsh/v1alpha1` `Backend`, seam XIV) has its
   public surface frozen with the first published apiVersion**: the type surface
   (`BackendSpec`, `validateBackendSpec`, `backendAdmission`) and conformance
-  (`TUI-BACKEND-001`) are usable, and the **admission chain (manifest →
-  registry → descriptor) is wired**; what is still missing is the step that
-  reads a mounted bundle's declaration into the registry and the kernel picker
-  (the install chain), so "install a third-party backend, restart, see it in the
-  picker" does not hold end to end yet.
+  (`TUI-BACKEND-001`) are usable, and **both the admission chain (manifest →
+  registry → descriptor) and the install chain are wired**: the boot scans the
+  bundles the profile declares (`dsh.profile.bundles`, written by `/plugin install`
+  and by `dsh plugin add` alike), reads `dsh-plugin.json` from the package root
+  nearest the actual ESM entry, and registers what the validator and the admission
+  accept — so "install a third-party backend, restart, see it in the picker" holds.
+  Three boundaries: that scan runs **before** backend-choice registry membership
+  is checked (the Config schema checks syntax only, and the standalone entry's
+  full/light composition follows the final, assembled kernel); a backend's
+  implementation is read from its entry module's `backend` export
+  (`backendExport` is an in-tree private field, so a declaration cannot name another
+  export) and that module is imported only when the backend is actually selected;
+  and installing **without restarting** still does not put it in the picker — that
+  is not a promise.
+  Each bundle currently binds one `Backend` declaration. Its manifest must pass
+  canonical projection, including unique contribution identities, and the handler
+  id must match the declaration. Entries awaiting authorization stay registered
+  but are neither probed nor loaded; explicitly selecting one at startup fails too.
+- **Installing a package is available in the terminal itself (C-4)**: `/plugin
+  install <spec>` goes through the host's `ctx.pluginManager` — a pre-install
+  notice, a trust confirmation decided by provenance of the package (the judge is
+  the packaged `tui-profile/feed/first-party.json`, decided offline; anything it
+  cannot vouch for falls back to the confirmation), and `esc` to close the pane.
+  During an install, it attempts cancellation and waits for profile writes to
+  settle: the service rolls the profile back on cancellation, or finishes the
+  install if applying has already made cancellation too late. Blocked build
+  scripts can be approved in the pane, and an incompatible version can receive
+  an **exact-version exemption**. Cancelling during exemption registration waits
+  for the current write and stops subsequent grants and the retry; exemptions
+  already written remain. **Known gaps**:
+  provenance is only a one-vote-to-veto seam with no online check at all (the
+  host service exposes no such API), and with no service the transcript reports
+  the CLI command and the reason instead of **running `dsh plugin` on the user's
+  behalf** (no pane opens: there is no flow to drive).
+- **Lifecycle actions are available in the terminal itself (C-5)**: `/plugin remove
+  <bundle>`, `/plugin enable <name|id>` and `/plugin disable <name|id>` go through the
+  same host service. **A bundle and a row are two levels**: a bundle is a composition
+  layer (the profile manifest's `dsh.profile.bundles`), a row is one patch entry's
+  `disabled`. The argument resolves against one snapshot, a bundle name first and
+  exactly, then `entryId` → `patchId` → module name; nothing that matches is reported
+  with what is addressable rather than guessed at. A module name matching multiple rows
+  is refused with their row IDs; use a specific ID. **Gate 2** (this application may not
+  switch itself off) refuses three kinds of target hard — the bundle providing this app,
+  the host layer `@deepseek-ai/dsh-base`, and this application's own rows (those loading
+  a module of this package, **or inserted by its own patch**: measured, that patch inserts
+  17 rows and 8 of them load a first-party `@deepseek-ai/*` module, of which the host locks
+  exactly one) — with a reason line and **no service call at all**, and it does so whether or not hot
+  reload is live (the host's own `stop-profile` guard only fires without HMR, and this
+  profile runs `patchReload: live`). `enable` is never refused by gate 2: it is the
+  repair action, and refusing it would seal off the only in-UI way back from a profile
+  somebody edited by hand. The host's own lock (`management-required` / `unaddressable`)
+  refuses both directions and its reason is quoted as given. **Every `enable` and `remove` requires confirmation** (a removal lists the
+  rows and overrides it drops), while `disable` asks only about a row the host layer
+  owns (switching one off unloads services this app injects). The host does not attest
+  installed package sources: local and Git packages can claim the same name and version,
+  so an exact feed match cannot waive confirmation when enabling. These actions have **no
+  cancellation**: the service offers none, so `esc` only closes the pane while the write
+  finishes and reports itself into the transcript (same session). **Known gaps**: a
+  removal deletes no user data — `~/.dsh-tui/backends/<id>/`, grants and storage
+  namespaces are **reported once** and left for the person to delete; when a package's
+  declaration cannot be read, the flow says it could not judge rather than claiming the
+  removal was clean.
 - `grants` is now the narrower `HostGrantFacade`; see that PR for migration
   details.
 - On `TuiSceneProps.channel` (`ChannelUi`), `minimal` / `setMinimal()` were

@@ -10,6 +10,7 @@ export type { SessionModeSpec } from './adapter/ports/channel-display.js'
  * `plan`, but not with `sandbox` or `approval`.
  */
 import { t } from './i18n.js'
+import { permissionPresetLabel } from './permissionPresetLabels.js'
 
 /** The shipped cycle when cordis.yml pins no `modes` — array order IS the
  *  Shift+Tab cycle order; index 0 is the unmarked base mode. */
@@ -146,9 +147,14 @@ export function resolveSessionModes(raw: readonly SessionModeSpec[] | undefined)
   return modes.length === 0 ? { modes: DEFAULT_SESSION_MODES, dropped } : { modes, dropped }
 }
 
-/** Display name: explicit `label` > built-in i18n (`mode-default`/
- *  `mode-plan`/`mode-full` for those ids) > the raw id. */
+/** Display name: a dynamic runtime preset's label (localized at render time
+ *  for presets the TUI owns, so `/lang` applies without a roster rebuild) >
+ *  explicit `label` > built-in i18n (`mode-default`/`mode-plan`/`mode-full`
+ *  for those ids) > the raw id. */
 export function modeDisplayName(spec: SessionModeSpec): string {
+  if (spec.permission !== undefined && spec.label !== undefined && spec.id === `permission:${spec.permission}`) {
+    return permissionPresetLabel({ value: spec.permission, name: spec.label })
+  }
   if (spec.label !== undefined) return spec.label
   if (spec.id === 'default') return t('mode-default')
   if (spec.id === 'plan') return t('mode-plan')
@@ -159,7 +165,7 @@ export function modeDisplayName(spec: SessionModeSpec): string {
 /**
  * One dynamic Shift+Tab entry for a runtime permission preset. The id is
  * namespaced so it can never collide with a configured mode id, the label
- * carries the registry's display name, and the entry declares NO atoms: a
+ * carries the registry's display name (see modeDisplayName), and the entry declares NO atoms: a
  * dynamic preset is selected through its durable `permission/preset`
  * identity only, never by an atom wildcard match (which would steal the
  * indicator on sessions that never held that identity).

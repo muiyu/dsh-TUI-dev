@@ -59,6 +59,11 @@ for (const guideFile of ['SKILL.md', ...guideFiles()]) {
   const entry = `${GUIDE_DIR}/${guideFile}`
   if (!packed.has(entry)) throw new Error(`packaged user guide missing from tarball: ${entry}`)
 }
+// 嫡系 feed（C-4）："随包发布"不是口头承诺——清单里的每一条判定都发生在用户机器上，
+// 少了这份文件，免确认分流会静默退回"全部按第三方"（fail closed 但失去意义）。
+for (const feedFile of ['tui-profile/feed/first-party.json']) {
+  if (!packed.has(feedFile)) throw new Error(`packaged first-party feed missing from tarball: ${feedFile}`)
+}
 for (const path of packed) {
   const lower = path.toLowerCase()
   if (lower.includes('plugin-spec/')
@@ -112,6 +117,27 @@ await import(new URL(`../${manifest.main}`, import.meta.url))
 const invariant = await import(new URL('../lib/types/dsh-adapter/invariant.js', import.meta.url))
 if (invariant.name !== 'dsh-tui-invariant' || typeof invariant.apply !== 'function') {
   throw new Error('compiled invariant entry does not expose the expected contract')
+}
+// The compatibility entry still mounts after DSH retired its invariant service,
+// and keeps the legacy registration's disposer when an older host provides it.
+const { Context } = await import('@deepseek-ai/cordis')
+for (const legacy of [false, true]) {
+  const ctx = new Context()
+  let registered = false
+  let disposed = false
+  if (legacy) ctx.provide('invariants', {
+    register(name) {
+      if (name !== manifest.name) throw new Error('invariant companion registered the wrong package')
+      registered = true
+      return () => { disposed = true }
+    },
+  })
+  try {
+    const fiber = ctx.plugin(invariant)
+    await fiber
+    await fiber.dispose()
+    if (registered !== legacy || disposed !== legacy) throw new Error('invariant companion lifecycle drifted')
+  } finally { await ctx.fiber.dispose() }
 }
 
 console.log(`package surface OK (${packed.size} files, ${targets.size} entry targets)`)

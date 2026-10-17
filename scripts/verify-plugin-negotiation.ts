@@ -393,6 +393,21 @@ const overview = () => pluginsInfoLines('', { grants, host })
   reportHost = { ...reportHost, selfCheck: () => ['late registry violation'] }
   check1('reports exposes live registry violations',
     reportActions.doctorInfo().some(line => line.includes('自检') && line.includes('✗ 1')))
+  // The support list is how a person discovers a form: a subcommand the parser
+  // accepts but the message never mentions is a dead end (C-5). Read off the
+  // rendered line rather than the dictionary, so a key that stopped being used
+  // cannot keep this green.
+  const unknownLine = pluginsInfoLines('bogus', { grants, host }).find(line => line.includes('未知子命令'))
+  check1('the unknown-subcommand list names the three lifecycle forms',
+    unknownLine !== undefined &&
+    unknownLine.includes('remove <bundle>') && unknownLine.includes('enable <') && unknownLine.includes('disable <'),
+    unknownLine)
+  const usage = (sub: string) => pluginsInfoLines(sub, { grants, host }).find(line => line.includes('用法'))
+  check1('a bare lifecycle form is a usage error, never a silent no-op',
+    usage('remove')?.includes('/plugin remove') === true &&
+    usage('enable')?.includes('/plugin enable') === true &&
+    usage('disable')?.includes('/plugin disable') === true,
+    [usage('remove'), usage('enable'), usage('disable')].join(' | '))
   const i18n = readFileSync(join(root, 'src/i18n.ts'), 'utf8')
   check1('trust banner exists in both languages',
     i18n.includes("'plugins-trust-banner'") && i18n.includes('同进程运行') && i18n.includes('in-process with the host'))

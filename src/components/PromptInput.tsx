@@ -1252,6 +1252,7 @@ export function PromptInput({
   // index space: `suggestions` stays the only list selection, Enter dispatch and
   // clicks read, and the default selection stays the first normal-region row.
   // The region is marked by colour only — it costs no display row.
+  const completionInput = value
   const completions = value.startsWith('/') ? channel.commandCompletions(value) : []
   const holdOf = (commandLine: string): boolean =>
     workingHoldOf(commandLine, channel.commandList.find(
@@ -2032,7 +2033,10 @@ export function PromptInput({
       editDocked(dockSelectedRef.current)
       return
     }
-    if (overlayOpen) {
+    // A preceding edit in this stdin batch has already updated valueRef, but
+    // the completion rows still belong to the last render. Submit the current
+    // draft through the ordinary path instead of accepting a stale row.
+    if (overlayOpen && value === completionInput) {
       const command = suggestions[selectedCommand]
       if (command) {
         tryRunCommand(command.commandLine)
@@ -2747,7 +2751,7 @@ export function PromptInput({
     }
     if (key.tab && overlayOpen) {
       const command = suggestions[selectedCommand]
-      if (command) {
+      if (command && value === completionInput) {
         updateFoldBlock(null)
         setInput(command.replacement, command.replacement.length, 'step')
       }
@@ -4392,7 +4396,7 @@ export function PromptInput({
             // 点击行 = 运行该命令（与 Enter 同路径）
             onPick={(index) => {
               const command = suggestions[index]
-              if (command) tryRunCommand(command.commandLine)
+              if (command) tryRunCommand(valueRef.current === completionInput ? command.commandLine : valueRef.current)
             }}
             // 滚轮 = 移动选中行（与 ↑/↓ 同路径，窗口跟随）
             onWheelStep={(step) => {

@@ -1,6 +1,7 @@
 import type { AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { addUsageToCostBuckets, cloneCostBuckets, emptyCostBuckets, isDeepSeekOfficialProvider, isPeakHour, priceForModel } from '../deepseekPricing.js'
 import { toolResultPayload } from './compat/messages.js'
+import { toolFailureText } from './channel/transcript.js'
 import type { CostTokenBuckets, SubagentCostEntry, SubagentState, SubagentStatus, SubagentOutputLine, SubagentOutputKind, SubagentToolCall, SubagentTokenUsage } from '../adapter/ports/channel-view.js'
 export type { SubagentState, SubagentStatus, SubagentOutputLine, SubagentOutputKind, SubagentToolCall, SubagentTokenUsage, SubagentCostEntry } from '../adapter/ports/channel-view.js'
 
@@ -381,7 +382,7 @@ export class SubagentActivityStore {
           const payload = toolResultPayload(data.message)
           tool.status = data.error !== undefined || payload.isError ? 'failed' : 'completed'
           tool.endedAt = Date.now()
-          if (data.error !== undefined) tool.error = String(data.error)
+          if (data.error !== undefined) tool.error = toolFailureText(data.error, this.previewOf(payload.content) ?? '')
           else if (payload.isError) tool.error = this.previewOf(payload.content)
           else {
             tool.resultPreview = this.previewOf(payload.content)

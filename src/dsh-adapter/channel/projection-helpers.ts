@@ -9,6 +9,8 @@ const SUBAGENT_TOOL_NAMES = new Set([
   'subagent_claude_code',
   'subagent_codex',
   'spawn_task',
+  // Agent Teams: a teammate is a continuable child of the Lead.
+  'spawn_teammate',
 ])
 export function isSubagentToolName(name: string): boolean {
   return SUBAGENT_TOOL_NAMES.has(name.toLowerCase())

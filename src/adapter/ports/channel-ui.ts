@@ -1,5 +1,5 @@
 /** Host-owned in-process Channel contract. No runtime or upstream imports. */
-import type { ChatRow, AgentStatus, TokenUsage, TurnUsageSummary, SessionCostByModel, SubagentCostEntry, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, TrajectoryLane, TrajectorySource, ChannelSelection, AttachedContext, CompactionStatus, ContextOccupancy, ContextBreakdown, ChannelCapabilities, ChannelCostReport, ChannelRateLimit, ChannelSessionRef, BackendModeOption, BackendChannelOption, BackendChannelInput } from './channel-view.js'
+import type { ChatRow, AgentStatus, TokenUsage, TurnUsageSummary, SessionCostByModel, SubagentCostEntry, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, TrajectoryLane, TrajectorySource, ChannelSelection, AttachedContext, CompactionStatus, ContextOccupancy, ContextBreakdown, TeamView, ChannelCapabilities, ChannelCostReport, ChannelRateLimit, ChannelSessionRef, BackendModeOption, BackendChannelOption, BackendChannelInput } from './channel-view.js'
 import type { SpinnerMode, ToolBackground, ScrollGutterMode, PageMarginSetting, StatusBarConfig, SessionModeSpec, SplashFontSetting, JobGroupFoldMode, BrandSetting } from './channel-display.js'
 import type { LocalCommand, CommandCompletion, BalanceResult, FileCandidate, RecapOutcome } from './channel-catalog.js'
 import type { AgentCapabilities } from './channel-capabilities.js'
@@ -216,6 +216,12 @@ export interface ChannelUi {
    * window is (see the type's own doc).
    */
   readonly contextBreakdown: ContextBreakdown | undefined
+  /**
+   * The Agent Team of the session on screen (its Lead's roster and task board
+   * when the session is a teammate). `undefined` when there is no team: the
+   * backend has no teams, or the team is only its implicit Lead.
+   */
+  readonly team: TeamView | undefined
   /** Output tokens per second of the current/last turn's response, when known. */
   readonly tps: number | undefined
   /** Per-turn tps samples (sparkline history), oldest first. */

@@ -13,12 +13,28 @@
  * structurally so a regression can hand in a fake. The record types come from
  * the host package's own published declarations, so a field rename on the
  * upstream line fails the build rather than the screen.
+ *
+ * Types only: a profile has no copy of the package at run time (the dsh CLI
+ * ships it), so importing a value from it — `parseInstallSpec`, say — would
+ * fail on exactly the machines this code runs on. Anything this package needs
+ * to compute (a spec's name, a version) it takes from `inspect()` instead.
+ *
+ * The view covers the write half as well (install / cancel / enable / disable /
+ * remove / version exemptions), because both write flows reach the same probe:
+ * a second manager lookup could only drift from this one.
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type {
   BundleInfo,
+  ChangeResult,
   InspectOptions,
+  InstallBundleOptions,
+  PluginEntryId,
   PluginInfo,
+  PluginInstallCancellation,
+  PluginInstallLogChunk,
+  PluginInstallProgress,
+  PluginInstallRequestId,
   PluginRegistries,
   PluginSpecInspection,
 } from '@deepseek-ai/dsh-plugin-manager/types'
@@ -33,8 +49,48 @@ export interface PluginManagerView {
   listPlugins(): Promise<PluginInfo[]>
   /** The registries an installation asks, in order. */
   registries(): Promise<PluginRegistries>
-  /** What a spec names, read before installing it. */
+  /**
+   * What a spec names, read before installing it. The host bounds the lookup
+   * with its own timeout; nothing here passes an `AbortSignal`, so a cancel
+   * during the read stops the flow rather than the request (there is nothing to
+   * install yet either way).
+   */
   inspect(spec: string, options?: InspectOptions): Promise<PluginSpecInspection>
+  /**
+   * Install one spec into the profile. The call owns the whole run: it resolves
+   * only once pnpm (or the git check) has finished and the profile was restored
+   * or changed, so the returned promise IS the result — `waitForInstall` is the
+   * recovery path for a caller that lost it, not the way to collect it.
+   */
+  installBundle(spec: string, options?: InstallBundleOptions): Promise<ChangeResult>
+  /** Stop an installation this manager owns and wait until its files are back. */
+  cancelInstall(requestId: PluginInstallRequestId): Promise<PluginInstallCancellation>
+  /**
+   * Select or drop one bundle's composition layer, keeping its installed
+   * dependencies. Dropping a layer the manager itself lives in is refused by
+   * the host (`management-required`), and selecting one re-checks the running
+   * version (`incompatible-version`); both arrive in-band as
+   * `application: 'failed'`.
+   */
+  setBundleEnabled(name: string, enabled: boolean): Promise<ChangeResult>
+  /**
+   * Persist one loader entry's desired enablement, by the `entryId`
+   * `listPlugins()` reports. An entry the host cannot address
+   * (`readOnlyReason`) is refused before anything is written.
+   */
+  setPluginEnabled(id: PluginEntryId, enabled: boolean): Promise<ChangeResult>
+  /**
+   * Uninstall one bundle: drop its layer and remove it from the profile's
+   * dependencies. The host refuses a bundle it did not install
+   * (`not-removable`), one whose rows are live on a profile without hot reload
+   * (`stop-profile`), and one whose contributions are still running
+   * (`bundle-in-use`). Restores `package.json` and the lockfile on failure.
+   */
+  removeBundle(name: string): Promise<ChangeResult>
+  /** The exact-version exemptions the profile's compatibility file carries. */
+  listVersionExemptions(): { exemptions: Record<string, string[]>; warnings: string[] }
+  /** Grant or revoke one `package@version` × runtime exemption. */
+  setVersionExemption(packageVersion: string, runtimeVersion: string, enabled: boolean, acceptRisk?: boolean): Promise<ChangeResult>
 }
 
 /**
@@ -46,6 +102,47 @@ export function pluginManagerOf(ctx: Context): PluginManagerView | undefined {
   const manager = ctx.get('pluginManager', false)
   if (manager === undefined || manager === null) return undefined
   return manager as PluginManagerView
+}
+
+let installRequestSeq = 0
+
+/**
+ * A fresh id for one installation. `PluginInstallRequestId` is a branded string
+ * and no published subpath exports a constructor for the brand, so this is the
+ * one place that asserts one into existence; the counter is per process, which
+ * is all an id has to be for the service to correlate a cancel or a recovery
+ * with the run that asked.
+ */
+export function newInstallRequestId(): PluginInstallRequestId {
+  installRequestSeq += 1
+  return `dsh-tui-${process.pid}-${installRequestSeq}` as PluginInstallRequestId
+}
+
+/** The manager's install events, narrowed to the install that asked for them. */
+export interface PluginInstallEvents {
+  /** One installation's pnpm output, chunk by chunk. */
+  onLog(requestId: PluginInstallRequestId, listener: (chunk: PluginInstallLogChunk) => void): () => void
+  /** One installation's phase changes. */
+  onState(requestId: PluginInstallRequestId, listener: (progress: PluginInstallProgress) => void): () => void
+}
+
+/**
+ * Subscribe to the manager's install events for one request. The events are
+ * emitted on the shared context, so a profile running two installations would
+ * otherwise render both in one report; the request id is the only thing that
+ * tells them apart. Chunks the service leaves unidentified (its git connection
+ * check runs without a request) are not one installation's output and are
+ * dropped with the rest.
+ */
+export function pluginInstallEvents(ctx: Context): PluginInstallEvents {
+  return {
+    onLog: (requestId, listener) => ctx.on('plugin-manager/install-log', (chunk: PluginInstallLogChunk) => {
+      if (chunk.requestId === requestId) listener(chunk)
+    }),
+    onState: (requestId, listener) => ctx.on('plugin-manager/install-state', (progress: PluginInstallProgress) => {
+      if (progress.requestId === requestId) listener(progress)
+    }),
+  }
 }
 
 /**

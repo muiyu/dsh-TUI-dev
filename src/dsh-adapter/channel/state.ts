@@ -5,6 +5,7 @@ import type { AgentSession } from '../../agent/session.js'
 import type { PermissionStore } from '../../channel/permissions.js'
 import type { QuestionStoreLike } from '../../channel/questions.js'
 import type { ContextPressureSource } from '../context-occupancy.js'
+import type { TeamSource } from '../team-roster.js'
 import type { ActivityView } from '../activity-store.js'
 import type { SessionModeSpec } from '../../sessionModes.js'
 import { normalizeJobGroupFold, normalizePageMargin, normalizeScrollGutter, normalizeStatusBar, normalizeToolBackground, type JobGroupFoldMode, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../../tuiDisplayPrefs.js'
@@ -72,6 +73,11 @@ export interface ChannelLaunchOptions {
   /** Read that source's current value when a session binds (see
    *  {@link ChannelLaunchOptions.contextPressure}). */
   seedContextOccupancy?: (session: unknown) => void
+  /** Agent Teams roster/task-board source (see `dsh-adapter/team-roster.ts`);
+   *  a cached read, republished through its change feed. Absent → no team. */
+  team?: TeamSource
+  /** Point that source at the bound session's team and read its baseline. */
+  seedTeam?: (session: unknown) => void
   activityFrames?: string
   /** Settings namespace this boot registered its section under: the Config
    *  owner's Loader id (`resolveSettingsNamespace`), which is NOT always the

@@ -153,6 +153,8 @@ const dict = {
   'export-dir': { zh: '- 目录: {{cwd}}', en: '- Directory: {{cwd}}' },
   'mentions-attached': { zh: '已附加 {{count}} 个文件引用', en: { one: 'Attached {{count}} file reference', other: 'Attached {{count}} file references' } },
   'mentions-missing': { zh: '未找到引用: {{paths}}', en: 'References not found: {{paths}}' },
+  // Agent Teams: the tag after the sender of a peer message bubble.
+  'team-message-label': { zh: '团队消息', en: 'team message' },
   // T06 (PR-B · AC-5): transcript indicator above a user bubble whose send
   // consumed the live IDE selection. The ⧉ glyph lives in MessageList, not here.
   'selection-attached': {
@@ -710,6 +712,19 @@ const dict = {
   'permission-preset-workspace-write-desc': { zh: '工作区内读写；写入需先读该文件', en: 'Read/write inside the workspace; writes need a prior read' },
   'permission-preset-full-access': { zh: '完全访问', en: 'Full access' },
   'permission-preset-full-access-desc': { zh: '不受限读写，无需审批', en: 'Unrestricted access, no approvals' },
+  'permission-preset-auto': { zh: '自动授权审查', en: 'Auto review' },
+  'permission-preset-auto-desc': { zh: '模型在每次工具调用前审查授权；无文件沙箱，仅当前会话', en: 'The model reviews every tool call before it runs; no file sandbox, this session only' },
+  'permission-preset-exp-tag': { zh: 'EXP', en: 'EXP' },
+  'permission-auto-confirm-title': { zh: '启用自动授权审查（实验性）？', en: 'Enable Auto review (experimental)?' },
+  'permission-auto-confirm-session': { zh: '仅对当前会话生效，不会成为新会话的默认', en: 'Applies to this session only; never becomes the default for new sessions' },
+  'permission-auto-confirm-sandbox': { zh: '无文件沙箱：放行的调用拥有完全访问权限', en: 'No file sandbox: allowed calls run with full access' },
+  'permission-auto-confirm-cost': { zh: '每次工具调用都会额外发起一次模型审查请求', en: 'Every tool call costs one extra model review request' },
+  'permission-auto-confirm-risk': { zh: '审查放行的调用（含你已明确授权的中风险操作）直接执行；被拒的调用（含高风险）转为审批由你决定，子代理中直接拒绝；审查失败即不执行', en: 'Calls the review allows (including medium-risk ones you explicitly authorized) run without asking; denied calls, high-risk included, come to you as an approval, or are denied outright in subagents; a failed review never runs' },
+  'permission-auto-confirm-actions': { zh: '**Enter** 启用 · Esc 返回', en: '**Enter** to enable · Esc to go back' },
+  'permission-auto-confirm-enable': { zh: '启用', en: 'Enable' },
+  'permission-auto-confirm-back': { zh: '返回', en: 'Go back' },
+  'permission-auto-unavailable': { zh: '自动授权审查已不可用', en: 'Auto review is no longer available' },
+  'tool-error-auto-review-denied': { zh: '自动授权审查拒绝，未执行', en: 'Auto review denied; not executed' },
   'plan-picker-title': { zh: '计划模式', en: 'Plan mode' },
   'plan-mode-on': { zh: '开启', en: 'On' },
   'plan-mode-on-desc': { zh: '进入计划模式：只读，先规划后动手', en: 'Enter plan mode: read-only, plan before acting' },
@@ -760,8 +775,15 @@ const dict = {
   'btw-thread-context-recent': { zh: '后续答案参考最近 {{n}} 组问答', en: 'Answers use the last {{n}} Q/A pairs as context' },
   'btw-thread-context-omitted': { zh: '已省略更早 {{n}} 组问答', en: '{{n}} earlier Q/A pair(s) omitted' },
   'btw-thread-followup': { zh: '输入追问…（Enter 发送 · Esc 回到对话 · Tab 切列表）', en: 'Type a follow-up… (Enter send · Esc back to chat · Tab list)' },
-  'btw-input-placeholder': { zh: '点击或 Enter 提问', en: 'Click or press Enter to ask' },
+  'btw-input-placeholder': { zh: 'Enter 提问', en: 'Enter to ask' },
   'btw-input-hint-edit': { zh: 'Enter 发送 · Esc', en: 'Enter send · Esc' },
+  // 底栏（宿主拼的那行）里 btw 的面板段：列表层说选择与 s/c（已附加时同一个键是
+  // 撤回），编辑层只说「↑ 选择」——框内不再放键位提示，那里只剩一句占位。
+  'btw-list-hint': { zh: '↑/↓ 选择 · s 送聊天 · c 复制', en: '↑/↓ select · s to chat · c copy' },
+  'btw-list-hint-attached': { zh: '↑/↓ 选择 · s 撤回 · c 复制', en: '↑/↓ select · s unsend · c copy' },
+  // 编辑层：↑ 离开输入框、把光标放到列表上开始选择。用全局最主流的「选择」而不是
+  // 自造词（「回标题」没人看得懂）；列表层那条紧接着告诉你在列表里能做什么。
+  'btw-hint-edit-back': { zh: '↑ 选择', en: '↑ select' },
   'btw-empty-lines': { zh: '旁路问答不打断主线：答案只留在这里，不进主聊天与会话记录。', en: 'Side questions never derail the main line: answers stay here, out of the main chat and session log.' },
   'btw-thread-busy': { zh: '上一个侧问还在回答，等它结束再追问', en: 'Still answering the last side question; ask again once it finishes' },
   'btw-thread-error': { zh: '本轮失败', en: 'This turn failed' },
@@ -770,7 +792,7 @@ const dict = {
   'btw-thread-answer-attached': { zh: '答案已附加到下一次主聊天提交', en: 'Answer attached to your next main chat submission' },
   'btw-thread-answer-truncated': { zh: '答案过长，附加时已截断', en: 'Answer exceeded the attach limit and was truncated' },
   'btw-fullscreen-title': { zh: '侧问线程', en: 'Side thread' },
-  'btw-scene-hints': { zh: 'Enter 追问 · ↑/↓ 滚动 · n 新话题 · s 送聊天 · c 复制 · Esc 返回', en: 'Enter ask · ↑/↓ scroll · n new · s to chat · c copy · Esc back' },
+  'btw-scene-hints': { zh: 'Enter 追问 · ↑/↓ 选择 · n 新话题 · s 送聊天 · c 复制 · Esc 返回', en: 'Enter ask · ↑/↓ select · n new · s to chat · c copy · Esc back' },
   'btw-panel-unavailable': { zh: 'btw 面板未启用（/settings → dsh-tui.sidePanel.panels）', en: 'btw panel not enabled (/settings → dsh-tui.sidePanel.panels)' },
   'btw-output-unavailable': { zh: '没有收到回答', en: 'No answer received' },
   'btw-answering': { zh: '思考中…', en: 'Answering…' },
@@ -1043,6 +1065,12 @@ const dict = {
   'tool-name-write': { zh: '写入', en: 'Write' },
   'tool-name-todo_write': { zh: '待办清单', en: 'TodoWrite' },
   'tool-name-subagent': { zh: '子代理', en: 'Task' },
+  // Agent Teams tools (dsh-adapter/team-tools.ts supplies these as displayKey).
+  'tool-name-team-message': { zh: '团队消息', en: 'Message' },
+  'tool-name-team-roster': { zh: '团队成员', en: 'Team' },
+  'tool-name-team-wait': { zh: '等待团队', en: 'Wait' },
+  'tool-name-team-interrupt': { zh: '中断成员', en: 'Interrupt' },
+  'tool-name-team-task': { zh: '任务板', en: 'Tasks' },
   'tool-name-web_search': { zh: '联网搜索', en: 'WebSearch' },
   'tool-name-multiedit': { zh: '多处编辑', en: 'MultiEdit' },
   'tool-name-notebookedit': { zh: '笔记本编辑', en: 'NotebookEdit' },
@@ -1088,6 +1116,8 @@ const dict = {
   'sugg-more-below': { zh: '↓{{n}}', en: '↓{{n}}' },
   // 二级补全子项描述（/lang /theme /effort /preset /activity 的 children）
   'sugg-status-desc': { zh: '显示当前选择', en: 'Show the current choice' },
+  'sugg-team-on-desc': { zh: '开启 Agent Teams（启用团队 bundle）', en: 'Switch Agent Teams on (enable the team bundle)' },
+  'sugg-team-off-desc': { zh: '关闭 Agent Teams（停用团队 bundle）', en: 'Switch Agent Teams off (disable the team bundle)' },
   'sugg-lang-zh-desc': { zh: '切换界面语言到中文', en: 'Switch the UI language to Chinese' },
   'sugg-lang-en-desc': { zh: '切换界面语言到英文', en: 'Switch the UI language to English' },
   'sugg-theme-auto-desc': { zh: '跟随终端背景自动切换', en: 'Follow the terminal background' },
@@ -1201,6 +1231,7 @@ const dict = {
   'settings-saved': { zh: '已保存 {{ns}}', en: 'Saved {{ns}}' },
   'settings-save-failed': { zh: '保存 {{ns}} 失败——请重试', en: 'Saving {{ns}} failed — please retry' },
   'settings-secret-ref-reserved': { zh: '凭据 {{ref}} 由宿主保留，写入被拒绝：第三方设置区块不能覆盖宿主共享凭据', en: 'Credential {{ref}} is reserved by the host; write rejected: third-party settings sections cannot overwrite host-shared credentials' },
+  'settings-web-key-changed': { zh: '网页搜索设置已变化，请重新打开设置后输入密钥', en: 'Web search settings changed. Reopen settings and enter the key again.' },
   // /settings 里 sidePanel.panels 的勾选列表。
   'settings-panels-unclaimed': { zh: '暂无面板使用此 id：先保留，等插件注册后生效', en: 'No panel uses this id yet; kept until a plugin registers it' },
   'settings-panels-plugin': { zh: '插件面板（{{plugin}}）', en: 'Plugin panel ({{plugin}})' },
@@ -1318,7 +1349,6 @@ const dict = {
   'ext-action-handled': { zh: '输入已由插件处理', en: 'Input handled by a plugin' },
   'ext-decision-pending': { zh: '正在等待插件决定（{{event}}）…', en: 'Waiting for a plugin decision ({{event}})…' },
   'ext-stale-dropped': { zh: '等待插件期间会话已切换，该条输入已丢弃', en: 'Session switched while a plugin decided — the input was dropped' },
-  'ext-compact-stale': { zh: '等待插件期间会话已切换，压缩已取消', en: 'Session switched while a plugin decided — compaction abandoned' },
   'ext-shortcut-failed': { zh: '插件快捷键 {{combo}} 执行失败', en: 'Plugin shortcut {{combo}} failed' },
   'command-invoke-denied': { zh: '命令调用已被授权文件拒绝（commands.invoke 已撤销）', en: 'Command invocation denied by the grants file (commands.invoke revoked)' },
   'command-invoke-denied-owner': {
@@ -1338,7 +1368,7 @@ const dict = {
   'plugins-footprint-overflow': { zh: '…另有 {{count}} 个插件未显示', en: { one: '…{{count}} more plugin not shown', other: '…{{count}} more plugins not shown' } },
   'plugins-ledger-empty': { zh: '效果台账为空。', en: 'The effect ledger is empty.' },
   'plugins-ledger-header': { zh: '效果台账（{{file}}）尾 5 条：', en: 'Effect ledger ({{file}}), last 5 records:' },
-  'plugins-unknown-subcommand': { zh: '未知子命令：{{sub}}（支持：list / check <路径> / info <spec> / registries）', en: 'Unknown subcommand: {{sub}} (supported: list / check <path> / info <spec> / registries)' },
+  'plugins-unknown-subcommand': { zh: '未知子命令：{{sub}}（支持：list / install <spec> / remove <bundle> / disable <名称|id> / enable <名称|id> / check <路径> / info <spec> / registries）', en: 'Unknown subcommand: {{sub}} (supported: list / install <spec> / remove <bundle> / disable <name|id> / enable <name|id> / check <path> / info <spec> / registries)' },
   'plugins-check-usage': { zh: '用法：/plugin check <dsh-plugin.json 路径>', en: 'Usage: /plugin check <path-to-dsh-plugin.json>' },
   'plugins-check-not-found': { zh: '文件不存在：{{path}}', en: 'File not found: {{path}}' },
   'plugins-check-invalid-json': { zh: '不是可解析的 JSON：{{err}}', en: 'Not parseable JSON: {{err}}' },
@@ -1358,8 +1388,14 @@ const dict = {
   'plugins-check-host-unavailable': { zh: '当前没有 live Host Descriptor；只做静态 manifest 校验，不进行协议支持声明/协商。', en: 'No live Host Descriptor is available; only static manifest validation was performed, no protocol support declaration/negotiation.' },
   // profile 插件服务（ctx.pluginManager）：bundle/行列表与门禁 1 的标签
   'plugins-service-unavailable': {
-    zh: '当前内核没有 profile 插件服务（ctx.pluginManager）：bundle/行列表不可用。装/卸/启用请从命令行运行 `dsh plugin --profile dsh-tui …`，或以 `dsh --profile dsh-tui` 启动本应用。',
-    en: 'This kernel provides no profile plugin service (ctx.pluginManager): the bundle/row list is unavailable. Install, remove, or enable from the CLI with `dsh plugin --profile dsh-tui …`, or start this app through `dsh --profile dsh-tui`.',
+    zh: '当前内核没有 profile 插件服务（ctx.pluginManager）：bundle / 行列表与生命周期动作都不可用。',
+    en: 'This kernel provides no profile plugin service (ctx.pluginManager): the bundle/row list and the lifecycle actions are unavailable.',
+  },
+  // 第二行单独一条：转录里的报告行只留 preview 那么宽，把出口挤在第一行末尾等于看不见。
+  // 也不承诺 CLI 没有的动词——enable / disable 是服务写 profile 自己的文件（决策 C）。
+  'plugins-service-unavailable-route': {
+    zh: '装 / 卸走命令行：`dsh plugin --profile dsh-tui add|remove …`；启用 / 关闭没有命令行动词，请以 `dsh --profile dsh-tui` 启动本应用后在 /plugin 里操作。',
+    en: 'Install and remove go through the CLI: `dsh plugin --profile dsh-tui add|remove …`. Enable and disable have no CLI verb — start this app with `dsh --profile dsh-tui` and use /plugin.',
   },
   'plugins-service-error': {
     zh: '插件服务调用失败：{{err}}（上面的诊断部分照常显示。重试一次；仍失败请用 `dsh plugin --profile dsh-tui` 查看 CLI 侧的报错。）',
@@ -1371,8 +1407,8 @@ const dict = {
     en: 'No extra plugins in this profile: only the installation-supplied bundles and dsh-tui itself. Run /plugin list again after installing one.',
   },
   'plugins-list-hint': {
-    zh: '详情：/plugin info <名字>；安装源：/plugin registries；完整诊断：无参 /plugin。',
-    en: 'Details: /plugin info <name>; registries: /plugin registries; full diagnostics: bare /plugin.',
+    zh: '详情：/plugin info <名字>；卸载：/plugin remove <名字>；启用 / 关闭：/plugin enable|disable <名字|行 id>；安装源：/plugin registries；完整诊断：无参 /plugin。',
+    en: 'Details: /plugin info <name>; remove: /plugin remove <name>; enable or disable: /plugin enable|disable <name|row id>; registries: /plugin registries; full diagnostics: bare /plugin.',
   },
   'plugins-bundles-header': { zh: '已装 bundle（数据来自 profile 插件服务）：', en: 'Installed bundles (from the profile plugin service):' },
   'plugins-bundles-official': { zh: '安装自带', en: 'Official (installation-supplied)' },
@@ -1410,6 +1446,194 @@ const dict = {
   'plugins-info-registries-fallbacks': { zh: '  回退：{{list}}', en: '  fallbacks: {{list}}' },
   'plugins-info-registries-resolved': { zh: '  pnpm 配置解析：{{registry}}', en: '  resolved from pnpm: {{registry}}' },
   'plugins-info-registries-none': { zh: '（无）', en: '(none)' },
+
+  // ── /plugin install（C-4 装链路：报告行由 dsh-adapter/plugin-install.ts 产出）──
+  'plugins-install-busy': {
+    zh: '回合正在运行，先结束它（或 /new）再装插件：安装会改动 profile 并触发应用／热重载',
+    en: 'A turn is running; finish it (or /new) before installing: an install changes the profile and applies or hot-reloads plugins',
+  },
+  'plugins-install-inspect': { zh: '将要安装：{{spec}}（{{kind}} · {{bundle}}）', en: 'About to install: {{spec}} ({{kind}} · {{bundle}})' },
+  'plugins-install-trusted': {
+    zh: '嫡系（feed 命中）：{{name}}@{{version}} —— 跳过装包信任确认；仍记 effect ledger，仍在 /plugin 列表可见',
+    en: 'First-party (feed hit): {{name}}@{{version}} — skipping the package trust confirmation; the effect ledger and the /plugin list are unaffected',
+  },
+  'plugins-install-attempt': { zh: '正在询问第 {{index}}/{{total}} 个安装源：{{registry}}', en: 'Asking registry {{index}}/{{total}}: {{registry}}' },
+  'plugins-install-installing': { zh: '正在安装…', en: 'Installing…' },
+  'plugins-install-cancelling': { zh: '正在取消…', en: 'Cancelling…' },
+  'plugins-install-applying': { zh: '正在应用…', en: 'Applying…' },
+  'plugins-install-log-line-omitted': {
+    zh: '已省略超长日志行（每行上限 {{bytes}} 字节）。',
+    en: 'An oversized log line was omitted (limit: {{bytes}} bytes per line).',
+  },
+  'plugins-install-build-blocked': {
+    zh: '安装被构建脚本拦住：有 {{count}} 个脚本待批准（批准后才会重试安装）',
+    en: 'Blocked by build scripts: {{count}} awaiting approval (the install retries only after approval)',
+  },
+  'plugins-install-build-approved': {
+    zh: '已批准 {{count}} 个构建脚本（写入 profile 的 allowBuilds），正在重试安装',
+    en: 'Approved {{count}} build scripts (written to the profile allowBuilds); retrying the install',
+  },
+  'plugins-install-incompatible': { zh: '版本不兼容：{{packages}}（当前 DSH {{runtime}}）', en: 'Incompatible version: {{packages}} (running DSH {{runtime}})' },
+  'plugins-install-exempted': {
+    zh: '已为 {{count}} 个包登记精确版本豁免（accept-risk）',
+    en: 'Recorded an exact-version exemption for {{count}} package(s) (accept-risk)',
+  },
+  'plugins-install-exemptions-unreadable': {
+    zh: '读不到当前的版本豁免清单：{{reason}}（面板按"没有豁免"继续）',
+    en: 'Could not read the current version exemptions: {{reason}} (the pane continues as if there were none)',
+  },
+  'plugins-install-done': { zh: '已安装 {{bundle}}：{{state}}', en: 'Installed {{bundle}}: {{state}}' },
+  'plugins-install-state-applied': { zh: '已应用', en: 'applied' },
+  'plugins-install-state-restart': { zh: '需要重启', en: 'restart required' },
+  'plugins-install-state-overridden': { zh: '被覆盖（HMR 生效中）', en: 'overridden (HMR is live)' },
+  'plugins-install-restart-hint': { zh: '重启本应用后它才会作为后端 / 贡献生效。', en: 'Restart this app for it to take effect as a backend / contribution.' },
+  'plugins-install-failed': { zh: '安装失败：{{reason}}', en: 'Install failed: {{reason}}' },
+  'plugins-install-manual': { zh: '手工命令：dsh plugin --profile {{profile}} add {{spec}}', en: 'Manual command: dsh plugin --profile {{profile}} add {{spec}}' },
+  'plugins-install-rescue': { zh: '反复失败时用救援 profile：dsh-tui safe --rescue', en: 'If it keeps failing, use the rescue profile: dsh-tui safe --rescue' },
+  'plugins-install-cancelled': { zh: '已取消安装（profile 已回滚）', en: 'Install cancelled (the profile was rolled back)' },
+  'plugins-install-cancel-too-late': { zh: '已进入应用阶段，无法取消', en: 'Already applying; it cannot be cancelled' },
+  'plugins-install-cancel-not-running': { zh: '没有在跑的安装（可能已经结束）', en: 'No installation is running (it may have finished)' },
+  'plugins-install-cancel-failed': { zh: '取消失败：{{reason}}', en: 'Cancel failed: {{reason}}' },
+  'plugins-install-drift': {
+    zh: '注意：profile 里的 {{name}} 现在是 {{found}}，本进程运行的是 {{running}}；对齐它：dsh plugin --profile {{profile}} add {{name}}@{{running}}',
+    en: 'Heads up: {{name}} in the profile is now {{found}} while this process runs {{running}}; realign it: dsh plugin --profile {{profile}} add {{name}}@{{running}}',
+  },
+  'plugins-install-usage': { zh: '用法：/plugin install <包名[@版本] | 路径 | git URL>', en: 'Usage: /plugin install <package[@version] | path | git url>' },
+
+  // ── components/PluginInstallPane.tsx（装前提醒 / 信任确认 / 两个"再决定"步骤）──
+  'plugins-install-pane-title': { zh: '安装插件', en: 'Install plugin' },
+  'plugins-install-configure': { zh: '要安装：{{spec}} · {{kind}} · bundle={{bundle}}', en: 'To install: {{spec}} · {{kind}} · bundle={{bundle}}' },
+  'plugins-install-unidentified': { zh: '（服务未给出包名）', en: '(the service named no package)' },
+  'plugins-install-trust-third-party': {
+    zh: '信任确认：插件与本应用同进程运行 —— 进程内全信任、无沙箱；装上后不会自动更新；它的行为受声明的 grants 约束（授权是行为约束，不是安全隔离）。',
+    en: 'Trust: the plugin runs in-process with this app — full trust, no sandbox; it will not auto-update; its behaviour is bounded by the grants it declares (grants are behavioural constraints, not a security boundary).',
+  },
+  'plugins-install-notice-declared': {
+    zh: '声明可判定：该包的 dsh-plugin.json 已通过本 profile 的准入判定。',
+    en: 'Declaration readable: the package-root dsh-plugin.json passes this profile’s admission.',
+  },
+  'plugins-install-notice-undeclared': {
+    zh: '提醒：该包没有声明 TUI 贡献（包根缺少 dsh-plugin.json）；装上后不会作为后端/贡献出现，并会在 /plugin 列表里带常驻标签。',
+    en: 'Heads up: this package declares no TUI contribution (no package-root dsh-plugin.json); it will not appear as a backend/contribution, and /plugin will tag it.',
+  },
+  'plugins-install-notice-invalid': {
+    zh: '提醒：该包的声明本 profile 无法通过（{{err}}）；装上后不会作为后端/贡献出现。',
+    en: 'Heads up: this profile cannot accept the package’s declaration ({{err}}); it will not appear as a backend/contribution.',
+  },
+  'plugins-install-notice-unjudged': {
+    zh: '提醒：注册表里的包在装上之前无法判定是否声明了 TUI 贡献；若未声明，它不会作为后端/贡献出现，并会在 /plugin 列表里带常驻标签。',
+    en: 'Heads up: a registry package’s declaration cannot be read before it lands; if it declares none, it will not appear as a backend/contribution and /plugin will tag it.',
+  },
+  'plugins-install-builds-title': { zh: '以下构建脚本需要批准（写进 profile 的 allowBuilds）：', en: 'These build scripts need approval (written to the profile allowBuilds):' },
+  'plugins-install-incompatible-title': { zh: '版本不兼容的包：', en: 'Incompatible packages:' },
+  'plugins-install-exemptions-title': { zh: '已登记的精确版本豁免：', en: 'Exact-version exemptions recorded:' },
+  'plugins-install-key-confirm': { zh: '⏎ 安装 · esc 取消', en: '⏎ install · esc cancel' },
+  'plugins-install-key-builds': { zh: '⏎ 允许这些脚本并重试 · esc 取消', en: '⏎ allow these scripts and retry · esc cancel' },
+  'plugins-install-key-incompatible': { zh: '⏎ 接受风险并重试 · esc 取消', en: '⏎ accept the risk and retry · esc cancel' },
+  'plugins-install-key-cancel': { zh: 'esc 取消安装', en: 'esc cancel the install' },
+
+  // ── dsh-adapter/plugin-manage.ts + components/PluginManagePane.tsx（C-5 生命周期动作） ──
+  'plugins-manage-busy': {
+    zh: '有回合正在运行：先结束它或 /new，再执行这个动作（不改动 profile）。',
+    en: 'A turn is running: finish it or /new before this action (the profile is left alone).',
+  },
+  'plugins-manage-unknown': {
+    zh: '找不到目标：{{target}}（可寻址的：{{names}}）',
+    en: 'No such target: {{target}} (addressable: {{names}})',
+  },
+  'plugins-manage-ambiguous': {
+    zh: '{{target}} 匹配多行，请改用具体行 id：{{ids}}（profile 没有改动）。',
+    en: '{{target}} matches multiple rows. Use a specific row id: {{ids}} (the profile was not changed).',
+  },
+  'plugins-manage-refused-service-locked': {
+    zh: '拒绝：插件服务锁定了 {{target}}（{{reason}}）——两个方向都不是本应用能改的。',
+    en: 'Refused: the plugin service has {{target}} locked ({{reason}}); neither direction is this app\'s to take.',
+  },
+  'plugins-manage-refused-app-bundle': {
+    zh: '拒绝：{{target}} 就是本应用自己（门禁 2）——关了它，界面当场消失。',
+    en: 'Refused: {{target}} is this application itself (gate 2); switching it off takes the interface down with it.',
+  },
+  'plugins-manage-refused-host-bundle': {
+    zh: '拒绝：{{target}} 是本应用赖以运行的宿主层（门禁 2）——它提供本应用离不开的服务。',
+    en: 'Refused: {{target}} is the host layer this application runs on (gate 2); it provides services the interface needs.',
+  },
+  'plugins-manage-refused-not-removable': {
+    zh: '拒绝：{{target}} 不是本 profile 装的（安装自带），不可卸载。',
+    en: 'Refused: {{target}} was not installed by this profile (the dsh installation supplies it), so it cannot be removed.',
+  },
+  'plugins-manage-refused-row-not-removable': {
+    zh: '拒绝：{{target}} 是一行 patch，不能单独卸载——它随所属 bundle 走。',
+    en: 'Refused: {{target}} is a patch row and cannot be removed on its own; it goes with its bundle.',
+  },
+  'plugins-manage-refused-app-row': {
+    zh: '拒绝：{{target}} 提供本应用的界面（门禁 2）——关掉它，界面当场消失。',
+    en: 'Refused: {{target}} provides this application\'s interface (gate 2); switching it off takes the interface down with it.',
+  },
+  'plugins-manage-unchanged': {
+    zh: '{{target}} 已经是这个状态，profile 没有改动。',
+    en: '{{target}} is already in that state; the profile was not changed.',
+  },
+  'plugins-manage-removed': { zh: '已卸载 {{target}}：{{state}}', en: 'Removed {{target}}: {{state}}' },
+  'plugins-manage-enabled': { zh: '已启用 {{target}}：{{state}}', en: 'Enabled {{target}}: {{state}}' },
+  'plugins-manage-disabled': { zh: '已关闭 {{target}}：{{state}}', en: 'Disabled {{target}}: {{state}}' },
+  'plugins-manage-failed': { zh: '操作失败：{{reason}}', en: 'The action failed: {{reason}}' },
+  'plugins-manage-incompatible': {
+    zh: '版本不兼容：{{packages}}——要强行启用，先接受风险：dsh plugin --profile {{profile}} allow-version <包@版本> <当前版本> --accept-risk',
+    en: 'Incompatible version: {{packages}} — to force it, accept the risk first: dsh plugin --profile {{profile}} allow-version <package@version> <running version> --accept-risk',
+  },
+  'plugins-manage-manual-remove': {
+    zh: '手工命令：dsh plugin --profile {{profile}} remove {{target}}',
+    en: 'Manual command: dsh plugin --profile {{profile}} remove {{target}}',
+  },
+  'plugins-manage-manual-profile': {
+    zh: '启用 / 关闭没有命令行动词（profile 的依赖与 cordis.patch.yml 是服务写自己的文件）：请用 `dsh --profile {{profile}}` 启动本应用，在 /plugin 里操作；命令行只有 add / remove。',
+    en: 'Enable and disable have no CLI verb (the profile\'s dependencies and cordis.patch.yml are files the service writes for itself): start this app with `dsh --profile {{profile}}` and use /plugin; the CLI has add and remove only.',
+  },
+  'plugins-manage-residue': {
+    zh: '用户数据仍在：{{paths}} —— 不再需要时可手动删除。',
+    en: 'Your own data is still there: {{paths}} — delete it by hand when you no longer need it.',
+  },
+  'plugins-manage-residue-footprint': {
+    zh: '{{id}} 仍在授权文件 / 效果台账 / 存储目录里留有足迹',
+    en: '{{id}} still has a footprint in the grants file, the effect ledger or the storage directory',
+  },
+  'plugins-manage-residue-unjudged': {
+    zh: '读不到 {{target}} 的包内声明，无法判断它是否留下了用户数据（不猜）。',
+    en: 'The declaration inside {{target}} could not be read, so what data it left behind cannot be judged (nothing is guessed).',
+  },
+  'plugins-manage-usage': { zh: '用法：/plugin {{sub}} <bundle 名 | 行 id>', en: 'Usage: /plugin {{sub}} <bundle name | row id>' },
+  'plugins-manage-pane-title': { zh: '插件生命周期', en: 'Plugin lifecycle' },
+  'plugins-manage-action-remove': { zh: '卸载', en: 'remove' },
+  'plugins-manage-action-enable': { zh: '启用', en: 'enable' },
+  'plugins-manage-action-disable': { zh: '关闭', en: 'disable' },
+  'plugins-manage-configure': { zh: '要{{action}}：{{target}}', en: 'About to {{action}}: {{target}}' },
+  'plugins-manage-working': { zh: '正在写入 profile…', en: 'Writing the profile…' },
+  'plugins-manage-remove-facts': {
+    zh: '这是破坏性操作：它会改 profile 的 package.json 与 lockfile（服务失败时回滚），并移除它的 {{rows}} 行 / {{overrides}} 项覆盖；它留下的你自己的数据不会被删（有残留会另行提示）。',
+    en: 'This is destructive: it changes the profile\'s package.json and lockfile (rolled back if the service fails) and drops its {{rows}} rows / {{overrides}} overrides. Your own data is not deleted (any residue is reported separately).',
+  },
+  'plugins-manage-trust-facts': {
+    zh: '无法验证已装代码的安装来源：启用后它就在本进程内运行、不自动更新、没有沙箱。它声明的权限见 /plugin 的授权矩阵。',
+    en: 'The installed code\'s source cannot be verified: once enabled it runs inside this process, with no auto-update and no sandbox. Its declared permissions are in the /plugin grant matrix.',
+  },
+  'plugins-manage-host-row-facts': {
+    zh: '这一行属于宿主层（dsh-base）：关掉它会卸载本应用注入的服务，本应用可能重启或退出。',
+    en: 'This row belongs to the host layer (dsh-base): switching it off unloads services this application injects, and the app may restart or exit.',
+  },
+  'plugins-manage-team-active-facts': {
+    zh: '本会话有 {{members}} 个 teammate 正在运行或准备中。',
+    en: '{{members}} teammate(s) in this session are running or being created.',
+  },
+  'plugins-manage-team-unseen-facts': {
+    zh: '团队里有 {{members}} 个 teammate 可能正在运行：从 teammate 会话里看不到它们的运行状态。',
+    en: '{{members}} teammate(s) of this team may be running: their runs are not visible from a teammate session.',
+  },
+  'plugins-manage-team-active-stop': {
+    zh: '关闭团队会停止它们：团队服务卸载时释放仍在运行的 teammate。团队消息与任务板停止，团队记录留在会话里。',
+    en: 'Switching the team off stops them: the team service releases the teammates still running as it unloads. Team messages and the task board stop; the team record stays in the session.',
+  },
+  'plugins-manage-key-confirm': { zh: '⏎ 执行 · esc 关闭', en: '⏎ do it · esc close' },
+  'plugins-manage-key-busy': { zh: '写入中 · esc 只关面板，操作会继续（这三个动作没有取消面）', en: 'writing · esc only closes the pane, the action goes on (these three have no cancellation)' },
   'doctor-plugin-generation': { zh: '插件运行时 generation：{{id}}', en: 'Plugin runtime generation: {{id}}' },
   'doctor-plugin-registry': { zh: '插件规范注册表自检：{{state}}', en: 'Plugin-spec registry self-check: {{state}}' },
   'doctor-plugin-host-missing': { zh: 'plugin-host 行未挂载', en: 'plugin-host row not mounted' },
@@ -1557,6 +1781,57 @@ const dict = {
   'subagent-hint-back': { zh: '返回', en: 'back' },
   'subagent-hint-compose': { zh: '发消息', en: 'compose' },
   'subagent-empty-hint': { zh: '让主代理发起 Task 后，子代理会出现在这里', en: 'Subagents appear here once the main agent starts Task delegations' },
+
+  // ── Agent Teams：代理面板的团队模式（components/SubagentDashboard.tsx）──
+  'team-dashboard-title': { zh: ' 代理团队 ', en: ' Agent Team ' },
+  'team-status-provisioning': { zh: '准备中', en: 'provisioning' },
+  'team-status-running': { zh: '运行中', en: 'running' },
+  'team-status-idle': { zh: '空闲', en: 'idle' },
+  'team-status-active': { zh: '活跃', en: 'active' },
+  'team-status-failed': { zh: '失败', en: 'failed' },
+  'team-members-title': { zh: '成员', en: 'Members' },
+  'team-lead-row': { zh: 'lead · 当前会话', en: 'lead · this session' },
+  'team-lead-row-peer': { zh: 'lead', en: 'lead' },
+  'team-self-mark': { zh: '当前会话', en: 'this session' },
+  'team-others-title': { zh: '其他子代理', en: 'Other subagents' },
+  'team-tasks-title': { zh: '任务板 · {{completed}}/{{total}}', en: 'Tasks · {{completed}}/{{total}}' },
+  'team-tasks-empty': { zh: '暂无任务', en: 'No tasks' },
+  'team-tasks-count': { zh: '任务 {{completed}}/{{total}}', en: 'tasks {{completed}}/{{total}}' },
+  'team-last-run-failed': { zh: '上一轮失败 {{error}}', en: 'last run failed {{error}}' },
+  'team-task-blocked': { zh: '阻塞', en: 'blocked' },
+  'team-failure': { zh: '团队记录被拒：{{failure}}', en: 'Team record rejected: {{failure}}' },
+
+  // ── /team：团队模式开关（团队 bundle 的启停，见 docs/agent-teams-design.md「开关机制」）──
+  'team-cmd-unavailable': { zh: '当前内核没有 Agent Teams。', en: 'The current kernel has no Agent Teams.' },
+  'team-cmd-usage': { zh: '未知子命令「{{sub}}」。用法：/team [status] | on | off', en: 'Unknown subcommand "{{sub}}". Usage: /team [status] | on | off' },
+  'team-cmd-no-manager': {
+    zh: '本次启动没有 profile 插件服务，无法在会话内切换。改用：dsh plugin --profile {{profile}} add {{bundle}}（关闭用 remove），然后重启。',
+    en: 'This launch has no profile plugin service, so the team cannot be switched here. Use dsh plugin --profile {{profile}} add {{bundle}} (remove to switch off), then restart.',
+  },
+  'team-cmd-bundle': { zh: '团队 bundle：{{state}}', en: 'Team bundle: {{state}}' },
+  'team-cmd-on': { zh: '已开启', en: 'on' },
+  'team-cmd-off': { zh: '已关闭', en: 'off' },
+  'team-cmd-already-on': { zh: '团队 bundle 已开启，无需改动。', en: 'The team bundle is already on; nothing to change.' },
+  'team-cmd-not-installed': {
+    zh: '团队 bundle 未安装。在这里安装：/plugin install {{bundle}}（装完即开启）；或在终端：dsh plugin --profile {{profile}} add {{bundle}}',
+    en: 'The team bundle is not installed. Install it here with /plugin install {{bundle}} (it is switched on once installed), or in a terminal with dsh plugin --profile {{profile}} add {{bundle}}',
+  },
+  'team-cmd-kernel-unsupported': {
+    zh: '运行中的 DSH {{version}} 没有本应用能读取的团队 bundle：先把 DSH 换成 {{lines}} 之一，再安装同版本的团队 bundle。',
+    en: 'The running DSH {{version}} has no team bundle this app can read: switch DSH to one of {{lines}} first, then install the team bundle of that same version.',
+  },
+  'team-cmd-off-not-installed': { zh: '团队 bundle 未安装，团队本就是关闭的，无需改动。', en: 'The team bundle is not installed, so the team is already off; nothing to change.' },
+  'team-cmd-service': { zh: '团队服务：{{state}}', en: 'Team service: {{state}}' },
+  'team-cmd-running': { zh: '运行中', en: 'running' },
+  'team-cmd-stopped': { zh: '未运行', en: 'not running' },
+  'team-cmd-pending-on': { zh: 'profile 已开启团队，但服务没有运行：重启后生效，或服务激活失败（见日志）。', en: 'The profile has the team on but the service is not running: it applies after a restart, or the service failed to activate (see the log).' },
+  'team-cmd-pending-off': { zh: 'profile 已关闭团队，但服务仍在运行：重启后生效。', en: 'The profile has the team off but the service is still running: it applies after a restart.' },
+  'team-cmd-no-members': { zh: '本会话没有 teammate。', en: 'No teammates in this session.' },
+  'team-cmd-members': { zh: '本会话 teammate：{{total}} 个，其中 {{active}} 个运行中或准备中。', en: 'Teammates in this session: {{total}}, {{active}} running or provisioning.' },
+  'team-cmd-members-unseen': {
+    zh: '本会话 teammate：{{total}} 个，其中 {{active}} 个运行中或准备中，{{unseen}} 个可能在运行（从 teammate 会话里看不到）。',
+    en: 'Teammates in this session: {{total}}, {{active}} running or provisioning, {{unseen}} may be running (not visible from a teammate).',
+  },
 
   // ── agent team：子代理转录视图、发消息输入框、消息流 ──
   'agent-view-title': { zh: '子代理转录', en: 'Agent transcript' },
@@ -1932,6 +2207,7 @@ const dict = {
   'cmd-desc-migrate': { zh: '从其他编程代理导入对话（claude-code/codex/omp/zcode/grok-build）' },
   'cmd-desc-init': { zh: '在工作目录创建 AGENTS.md' },
   'cmd-desc-agents': { zh: '查看本会话的子代理' },
+  'cmd-desc-team': { zh: '团队模式：查看状态，或 on / off 开关（启停 Agent Teams bundle）' },
   'cmd-desc-jobs': { zh: '查看本会话的后台任务' },
   'cmd-desc-panel': { zh: '侧栏面板：开关 / 聚焦 / 缩放 / 切换', en: 'Side panel: toggle / focus / zoom / switch' },
   'cmd-desc-kernel': { zh: '选择内核（切换后重启进入）', en: 'Choose the kernel (restarts into it)' },
@@ -2028,8 +2304,15 @@ const dict = {
   'companion-stat-sessions': { zh: '会话 ×{{n}}', en: 'sessions ×{{n}}' },
   'picker-title-panel': { zh: '打开面板', en: 'Open panel' },
   'panel-sent-to-chat': { zh: '已附加到输入框：{{title}}（Esc 可撤）', en: 'Attached to the composer: {{title}} (Esc to remove)' },
+  // 面板把内容送进主输入框之后再撤回时的提示（btw 的 s 二次按下走这条）。
+  'panel-context-detached': { zh: '已从输入框撤回，不再附加到主聊天', en: 'Removed from the composer' },
   'companion-send-title': { zh: '伙伴状态', en: 'Companion status' },
-  'panel-hint-focused': { zh: 'Esc 聊天 · ←/→ 切换 · z 缩放 · +/- 调宽', en: 'Esc chat · ←/→ panels · z zoom · +/- width' },
+  // 底栏是拼出来的：导航（每个面板都有）→ 面板自己的能力键 → 列自身的缩放/调宽。
+  // 拼序就是重要性：窄面板从尾部截断（truncate-end），面板键因此不会被列控制挤掉。
+  'panel-hint-focused': { zh: 'Esc 聊天 · ←/→ 切换', en: 'Esc chat · ←/→ panels' },
+  // 声明 capabilities.sendToChat 的面板自己绑 s（btw/jobs 都是）。
+  'panel-hint-send-to-chat': { zh: 's 送聊天', en: 's to chat' },
+  'panel-hint-zoom-width': { zh: 'z 缩放 · +/- 调宽', en: 'z zoom · +/- width' },
   'panel-hint-unfocused': { zh: 'Ctrl+B 聚焦侧栏', en: 'Ctrl+B focus panel' },
   'panel-empty-none': { zh: '没有已启用的面板（/panel manage 管理）', en: 'No enabled panels (/panel manage)' },
   'panel-too-narrow': { zh: '宽度不足（需 ≥ {{min}} 列）', en: 'Too narrow (needs ≥ {{min}} cols)' },
@@ -2048,6 +2331,14 @@ const dict = {
   'sugg-plugin-info-desc': { zh: '查单个条目或待装 spec', en: 'Describe an installed plugin or an install spec' },
   'sugg-plugin-registries-desc': { zh: '查看安装源', en: 'Show where installations ask' },
   'sugg-plugin-check-desc': { zh: '校验清单，不安装', en: 'Validate a manifest without installing it' },
+  'sugg-plugin-install-desc': { zh: '把这个插件装进当前 profile', en: 'Install a plugin bundle into this profile' },
+  'sugg-plugin-remove-desc': { zh: '把这个插件从 profile 卸载', en: 'Uninstall a plugin bundle from this profile' },
+  'sugg-plugin-enable-desc': { zh: '重新启用一个 bundle 或行', en: 'Switch a plugin bundle or row back on' },
+  'sugg-plugin-disable-desc': { zh: '关闭一个 bundle 或行', en: 'Switch a plugin bundle or row off' },
+  // /plugin install | info 的参数位（示例 spec 的形状，不是可插入的候选）
+  'sugg-plugin-spec-path-desc': { zh: '示例：本地目录或仓库路径', en: 'Example: a local directory' },
+  'sugg-plugin-spec-git-desc': { zh: '示例：git 仓库 URL', en: 'Example: a git URL' },
+  'sugg-plugin-spec-package-desc': { zh: '示例：registry 包名（@版本 可钉死）', en: 'Example: a registry package, @version pins it' },
   'panel-unavailable-hint': { zh: '侧栏需要全屏且内容区 ≥93 列；该面板没有整屏形态', en: 'Sidebar needs fullscreen and ≥93 content columns; this panel has no fullscreen form' },
   // Model / display
   'cmd-desc-activity': { zh: '切换工作状态指示器预设' },

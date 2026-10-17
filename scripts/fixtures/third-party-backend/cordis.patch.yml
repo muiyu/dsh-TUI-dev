@@ -1,0 +1,9 @@
+# `dsh.bundle` is what makes this package a profile *layer*: the profile's plugin
+# manager only appends an installed package to `dsh.profile.bundles` when its
+# package.json declares one (otherwise it warns "installed as a plain dependency,
+# not a profile layer"), and the host's D-1 assembly reads exactly that list. A
+# backend-only bundle therefore still needs this file — and only this file.
+#
+# No rows to patch: the backend is declared in `dsh-plugin.json` and assembled by
+# the host, not mounted as a plugin row.
+[]

@@ -63,6 +63,9 @@ bin/dsh-tui.js（启动器：对齐、安全模式、Windows 解析）
                     └─ 失败 / 无 dsh-tui 行 → 组合失败上报给界面
 ```
 
+入口先建立中性的 Loader/模块解析根，装配 profile 声明的第三方后端后，再用最终内核调用
+`HostRoot.selectKernel()`：DSH 专用服务、完整/轻量组合与入口 slot 始终采用同一个答案，
+不能用发现前的回落值预先选择完整 DSH profile。
 内核判定沿用 `resolveRememberedBackend`（handoff → 配置行 → `DSH_TUI_BACKEND` → `kernel.json`）；
 配置行的 `backend` 由入口直接解析 profile 补丁里 `dsh-tui` 行读取
 （`hostEntryRoute.configuredBackend`），不经 app-boot。写成 `!!js` 的 `backend` 只有 profile 的

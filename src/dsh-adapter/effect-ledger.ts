@@ -51,8 +51,16 @@ import { compositionRoot, concreteService } from './host-access.js'
 import { createKernelLedger, type KernelLedger, type KernelLedgerRecord } from '../adapter/kernel/ledger.js'
 import type { HostOwnerRef } from '../adapter/ports/owner.js'
 
+/**
+ * The ledger's file name under a data directory. The name and the default
+ * location are separate so that a check reading "what is left under this data
+ * root" can point at another root and still find the ledger — the grants file and
+ * the storage directory already follow one (C-5).
+ */
+export const EFFECT_LEDGER_NAME = 'effect-ledger.jsonl'
+
 /** Default ledger file (JSONL, one record per line). */
-export const EFFECT_LEDGER_FILE = join(DATA_DIR, 'effect-ledger.jsonl')
+export const EFFECT_LEDGER_FILE = join(DATA_DIR, EFFECT_LEDGER_NAME)
 
 /** Resource kinds recorded by the host's wired emitters. */
 export const LEDGER_RESOURCE_KINDS = [

@@ -10,6 +10,7 @@ import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
 import type { DOMElement } from '../ink/dom.js'
 import { Divider } from './design-system/Divider.js'
 import { UserPromptMessage } from './messages/UserPromptMessage.js'
+import { TeamMessageBubble } from './messages/TeamMessageBubble.js'
 import { AssistantTextLeafRow, ThinkingLeafRow, ToolLeafRow } from './messages/TranscriptLeaves.js'
 import { liveOutputMaxLines, liveOutputRows } from './messages/liveOutputLines.js'
 import { SubagentMessage } from './Chat/SubagentMessage.js'
@@ -90,6 +91,18 @@ const NOOP_TOGGLE_STREAM_VIEW = (_rowId: number): void => {}
 // replayed history paints complete); once created, a cursor keeps revealing
 // until it catches up — settling mid-reveal must not snap (that is the
 // "non-streaming delivery becomes a smooth flow" contract).
+
+/** A row that opens a turn on the rail and the pinned header: a user row,
+ *  but not an Agent Teams peer message (never the human's prompt). */
+function isTurnRow(row: ChatRow): boolean {
+  return row.kind === 'user' && row.label !== 'team-message'
+}
+
+/** The sender a team-message row shows (empty when the event named none);
+ *  undefined for every other row, which renders as the human's prompt. */
+function teamSenderOf(row: ChatRow): string | undefined {
+  return row.label === 'team-message' ? row.sender ?? '' : undefined
+}
 
 function assistantRevealText(row: ChatRow, enabled: boolean): string {
   const stripped = stripNarration(row.text)
@@ -326,6 +339,8 @@ function signatureParts(
         row.selectionAttached === undefined ? 0 : 1,
         stringWidth(displaySelectionPath(row.selectionAttached?.path ?? '', sessionCwd)),
         String(row.selectionAttached?.lines ?? ''),
+        // A team message adds its sender line above the body.
+        teamSenderOf(row) ?? '',
       )
       // Long-line fold: expanding a folded row swaps the folded preview for
       // the raw line (thousands of rows), so both expansion switches are
@@ -919,9 +934,12 @@ export function MessageList({
         parts.length === cachedParts.length &&
         typeof parts[2] === 'number' && typeof cachedParts[2] === 'number' && parts[2] >= cachedParts[2] &&
         parts.every((part, index) => index === 2 || part === cachedParts[index])
-      if (!growingStream) heightsRef.current.delete(row.id)
-      // Retaining the estimate must not skip the next fresh Yoga read.
-      else if (localRefs.current.has(row.id)) growingStreamNeedsMeasure = true
+      // Keep a mounted row's estimate until the fresh Yoga read: falling back
+      // here could eject still-visible rows from this render's mount window.
+      // An unmounted row really paints the fallback spacer until it remounts.
+      // Retaining an estimate must never skip the next fresh measurement.
+      if (localRefs.current.has(row.id)) growingStreamNeedsMeasure = true
+      else if (!growingStream) heightsRef.current.delete(row.id)
       heightsVersionRef.current++
     }
   }
@@ -953,11 +971,31 @@ export function MessageList({
     total += heightOf(visibleRows[i])
   }
 
-  const scrollTop = scrollHandle?.getScrollTop() ?? 0
+  // Predict the anchor's signed offset delta before scanning the mount window.
+  // A remeasured offscreen spacer must return its provisional shrink, not leave
+  // the reader permanently over-corrected. Scan against the corrected position
+  // so the anchor stays mounted; the layout effect refines that prediction
+  // from fresh Yoga before paint. Never fight following, wheel debt, or a
+  // position the user changed. A row below the viewport top (the header's
+  // fallback pick) does not own the reader's position.
+  const anchorRef = React.useRef<{ id: number; index: number; top: number; scrollTop: number } | null>(null)
+  const scrollTopRaw = scrollHandle?.getScrollTop() ?? 0
   const pending = scrollHandle?.getPendingDelta() ?? 0
   const viewport = scrollHandle?.getViewportHeight() ?? 24
   const sticky = scrollHandle?.isSticky() ?? true
   const base = baseRef.current ?? DEFAULT_HEADER_LINES
+  const prevAnchor = anchorRef.current
+  let anchorCorrection = 0
+  if (
+    scrollHandle && prevAnchor !== null && prevAnchor.top <= prevAnchor.scrollTop &&
+    !sticky && pending === 0 && scrollTopRaw === prevAnchor.scrollTop
+  ) {
+    const anchored = visibleRows[prevAnchor.index]
+    if (anchored !== undefined && anchored.id === prevAnchor.id) {
+      anchorCorrection = prevAnchor.top - (base + (offsets[prevAnchor.index] ?? 0))
+    }
+  }
+  const scrollTop = Math.max(0, scrollTopRaw - anchorCorrection)
 
   // Mount the union of the committed position and any in-flight pending
   // delta, plus overscan; when sticky, always reach the tail (streaming row).
@@ -1233,7 +1271,7 @@ export function MessageList({
       const measuredTops = new Map<number, number>()
       for (let i = 0; i < visibleRows.length; i++) {
         const row = visibleRows[i]!
-        if (row.kind !== 'user') continue
+        if (!isTurnRow(row)) continue
         measuredTops.set(row.id, base + offsets[i]! + (margins.get(row.id) === true ? 1 : 0))
       }
       // Walk ALL rows (not the fold window): the rail must cover the whole
@@ -1245,7 +1283,7 @@ export function MessageList({
       // click goes through the reveal path, not scrollTo).
       const turns: TimelineTurn[] = []
       for (const row of rows) {
-        if (row.kind !== 'user') continue
+        if (!isTurnRow(row)) continue
         let cached = previewCache.get(row.id)
         const imageCount = row.images?.length ?? 0
         if (cached === undefined || cached.len !== row.text.length || cached.imageCount !== imageCount || cached.lang !== lang) {
@@ -1332,6 +1370,7 @@ export function MessageList({
     onTimeline?.(timeline)
   })
 
+  // Scroll anchoring, commit half of the render-time pass above.
   // Post-commit: measure mounted rows, derive the content-space base from
   // the first mounted row's Yoga top, and clamp render-time scrollTop to the
   // mounted coverage so burst scrolls never show blank spacer.
@@ -1366,6 +1405,14 @@ export function MessageList({
       }
     }
     if (scrollHandle) {
+      // Fresh bounds must move with a prefix's real height, too: an estimated
+      // max can otherwise clamp away a positive correction larger than overscan.
+      const mountedTop = top ?? base + topPad
+      const lastMounted = visibleRows[end - 1]
+      const lastYoga = lastMounted ? localRefs.current.get(lastMounted.id)?.yogaNode : undefined
+      const mountedEnd = lastYoga === undefined
+        ? base + mountedBottom
+        : lastYoga.getComputedTop() + lastYoga.getComputedHeight()
       if (sticky || (start === 0 && end >= visibleRows.length)) {
         // Sticky still needs the MIN clamp: the first wheel-up breaks sticky
         // on the DOM (ScrollBox.scrollBy) several frames before React
@@ -1375,10 +1422,11 @@ export function MessageList({
         // behavior as the steady-state scroll path. The MAX clamp stays
         // disabled: sticky follow pushes scrollTop to each frame's new
         // maxScroll, which a stale mounted max would clamp away.
-        const min = start > 0 ? Math.max(0, base + topPad - viewport) : undefined
+        const min = start > 0 ? Math.max(0, mountedTop - viewport) : undefined
         scrollHandle.setClampBounds(min, undefined)
       } else {
-        const min = Math.max(0, base + topPad - viewport)
+        // With no top spacer, the mounted header must remain reachable at Home.
+        const min = start > 0 ? Math.max(0, mountedTop - viewport) : 0
         // Upper clamp only while unmounted content remains below the window
         // (bottomPad spacer): it exists to pin the paint to the mounted edge
         // during burst scrolls that outrun React's window re-render. Once the
@@ -1391,9 +1439,46 @@ export function MessageList({
         // still caps at the frame's real maxScroll.
         scrollHandle.setClampBounds(
           min,
-          bottomPad <= 0 ? undefined : Math.max(min, base + mountedBottom - viewport),
+          bottomPad <= 0 ? undefined : Math.max(min, mountedEnd - viewport),
         )
       }
+      // Yoga is fresh even when this render retained an old height estimate.
+      // Refine the prediction before paint, not on the later measure tick, and
+      // recheck input intent in case scrolling moved between render and commit.
+      const anchorBase = baseRef.current ?? base
+      let anchoredTop = scrollHandle.getScrollTop()
+      if (
+        prevAnchor !== null && prevAnchor.top <= prevAnchor.scrollTop &&
+        visibleRows[prevAnchor.index]?.id === prevAnchor.id &&
+        !scrollHandle.isSticky() && scrollHandle.getPendingDelta() === 0 &&
+        anchoredTop === prevAnchor.scrollTop
+      ) {
+        const measuredTop = localRefs.current.get(prevAnchor.id)?.yogaNode?.getComputedTop()
+        const correction = measuredTop === undefined ? anchorCorrection : prevAnchor.top - measuredTop
+        if (correction !== 0) {
+          scrollHandle.anchorBy(-correction)
+          anchoredTop = scrollHandle.getScrollTop()
+        }
+      } else if (anchorCorrection !== 0) {
+        changed = true
+      }
+      // Pick and record in the same fresh coordinates as the correction.
+      // Recording old offsets after a fresh read would consume that delta again.
+      let pick = start
+      let pickedTop = anchorBase + (offsets[start] ?? 0)
+      for (let i = start; i < end; i++) {
+        const row = visibleRows[i]!
+        const rowTop = localRefs.current.get(row.id)?.yogaNode?.getComputedTop() ?? anchorBase + (offsets[i] ?? 0)
+        if (i === start || rowTop <= anchoredTop) {
+          pick = i
+          pickedTop = rowTop
+        }
+        if (rowTop > anchoredTop) break
+      }
+      const picked = visibleRows[pick]
+      anchorRef.current = picked === undefined
+        ? null
+        : { id: picked.id, index: pick, top: pickedTop, scrollTop: anchoredTop }
     }
     if ((changed || growingStreamNeedsMeasure) && measureTimerRef.current === null) {
       // Layout corrections can cascade for many rows. Yield to the next
@@ -1482,6 +1567,7 @@ export function MessageList({
               textFull={row.kind === 'reasoning' ? row.text : undefined}
               executionTarget={row.executionTarget}
               selectionAttached={row.selectionAttached}
+              sender={teamSenderOf(row)}
               streaming={displayStreaming}
               thinkingOpen={row.thinkingOpen === true}
               durationMs={row.durationMs}
@@ -1564,6 +1650,7 @@ type MemoRowProps = {
   executionTarget: string | undefined
   /** IDE selection indicator (user rows): rendered above the prompt bubble. */
   selectionAttached: ChatRow['selectionAttached']
+  sender: ChatRow['sender']
   /** Session cwd for the indicator's display-path relativization (T-FIX-01). */
   sessionCwd: string | undefined
   streaming: boolean
@@ -1670,6 +1757,7 @@ function TranscriptRow({
   textFull,
   executionTarget,
   selectionAttached,
+  sender,
   sessionCwd,
   streaming,
   thinkingOpen,
@@ -1793,7 +1881,15 @@ function TranscriptRow({
               })}
             </Text>
           )}
-          {text !== '' && (
+          {text !== '' && sender !== undefined && (
+            <TeamMessageBubble
+              sender={sender}
+              text={displayText}
+              marginTopOnTurn={marginTopOnTurn}
+              isSelected={isSelected}
+            />
+          )}
+          {text !== '' && sender === undefined && (
             <UserPromptMessage
               text={displayText}
               marginTopOnTurn={marginTopOnTurn}

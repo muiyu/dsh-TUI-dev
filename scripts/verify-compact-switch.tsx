@@ -8,6 +8,8 @@
  *     的拒绝必须与通用失败分开提示（含「压缩已生效」语义，不再裸报失败）。
  *  3. 已落定不阻塞——压缩正常完成后切换不触发取消路径。
  *  4. /fork 与逐行 rewind 也必须在快照前取消同一压缩事务。
+ *  5. 压缩事务归属 live Agent：/bg 转后台与返回只换前台视图，原会话的压缩
+ *     继续且可取消；切到别的会话则落定被离开会话的压缩。
  *
  * 背景：长会话 /compact 的摘要 LLM 很慢，用户等不及直接 /model；旧实现
  * fork 快照先走、旧压缩事务在后台照常提交 checkpoint，新会话从"只剩摘要"
@@ -63,12 +65,12 @@ function makeEvents(turns = 2): Array<Record<string, unknown>> {
   return events
 }
 const stubAgentCtx = { on: () => () => {} }
-function makeAgent(id: string, sessionEvents: readonly unknown[], onSnapshot?: () => void) {
+function makeAgent(id: string, sessionEvents: readonly unknown[] = [], onSnapshot?: () => void) {
   return {
     id,
     status: 'idle',
     session: {
-      id: `s-${id}`,
+      id,
       seq: sessionEvents.length,
       get events() {
         onSnapshot?.()
@@ -79,18 +81,33 @@ function makeAgent(id: string, sessionEvents: readonly unknown[], onSnapshot?: (
     ctx: stubAgentCtx,
     followup() {},
     steer() {},
+    cancel() {},
     inbox: { remove: () => true },
-  } as never
+  }
+}
+
+/**
+ * Append events to a live stub session the way a real host would: the session's
+ * exclusive seq must match its snapshot length, or the fork/rewind seed slice
+ * rejects the whole log ("live Session contract violation: snapshot length N
+ * does not match exclusive seq M").
+ */
+function appendLiveEvents(session: { events: readonly unknown[]; seq: number }, events: readonly unknown[]): void {
+  const log = session.events as unknown[]
+  log.push(...events)
+  session.seq = log.length
 }
 
 // ---- 可控 compaction 服务：记录 abort 时机，由剧本决定落定方式 ---------------
 type Script = { kind: 'hang-until-abort' } | { kind: 'reject'; code?: string; message: string } | { kind: 'resolve' }
 function makeCompaction(script: Script) {
-  const calls: Array<{ agentId: string; abortedAt: number | undefined }> = []
+  const calls: Array<{ agentId: string; abortedAt: number | undefined; finished: boolean; finish(): void }> = []
   return {
     calls,
     async compactNow(agent: { id: string }, signal: AbortSignal): Promise<unknown> {
-      const call = { agentId: agent.id, abortedAt: undefined as number | undefined }
+      let finish!: () => void
+      const completion = new Promise<void>(resolve => { finish = resolve })
+      const call = { agentId: agent.id, abortedAt: undefined as number | undefined, finished: false, finish }
       calls.push(call)
       if (script.kind === 'resolve') {
         await sleep(30) // 固定窗:pacing 桩内模拟压缩耗时，不是在等可观测状态
@@ -100,17 +117,17 @@ function makeCompaction(script: Script) {
         await sleep(30) // 固定窗:pacing 桩内模拟压缩耗时，不是在等可观测状态
         throw Object.assign(new Error(script.message), script.code === undefined ? {} : { code: script.code })
       }
-      // hang-until-abort：模拟慢摘要流——仅在 abort 后以 abort 原因拒绝
-      // （region.ts 的 signal.throwIfAborted 语义）。
+      // 慢摘要由场景显式结束，或以宿主 signal 的 abort 原因拒绝。
       await new Promise<void>((resolve, reject) => {
         const onAbort = () => {
           call.abortedAt = Date.now()
           reject(signal.reason instanceof Error ? signal.reason : new Error('aborted'))
         }
+        void completion.then(() => { signal.removeEventListener('abort', onAbort); resolve() })
         if (signal.aborted) onAbort()
         else signal.addEventListener('abort', onAbort, { once: true })
-      })
-      return undefined
+      }).finally(() => { call.finished = true })
+      return { shadowedSeqs: [1, 2] }
     },
   }
 }
@@ -128,13 +145,25 @@ function assemble(script: Script) {
     if (!stamps.has(name)) stamps.set(name, Date.now())
   }
   const compaction = makeCompaction(script)
-  let agentCounter = 0
+  type Handler = (...args: unknown[]) => unknown
+  const handlers = new Map<string, Set<Handler>>()
+  const emit = (event: string, ...args: unknown[]): void => {
+    for (const handler of [...handlers.get(event) ?? []]) handler(...args)
+  }
+  const live = new Map<string, ReturnType<typeof makeAgent>>()
+  const handleFor = (agent: ReturnType<typeof makeAgent>) => ({
+    agent,
+    dispose: async () => { live.delete(agent.session.id); emit('agent/disposed', { agent }) },
+  })
   const services: Record<string, unknown> = {
     agents: {
+      get: (id: string) => live.get(id),
+      list: () => [...new Set(live.values())],
       async create(options: { sessionId: string; seed: readonly unknown[] }) {
         mark('create')
-        agentCounter += 1
-        return { agent: makeAgent(`fork-${agentCounter}`, options.seed), dispose: async () => {} }
+        const created = makeAgent(options.sessionId, options.seed)
+        live.set(String(created.session.id), created)
+        return handleFor(created)
       },
     },
     llm: {
@@ -143,11 +172,12 @@ function assemble(script: Script) {
     },
     compaction,
   }
-  const handlers = new Map<string, unknown>()
   const ctx = {
-    on(event: string, handler: unknown) {
-      handlers.set(event, handler)
-      return () => handlers.delete(event)
+    on(event: string, handler: Handler) {
+      const entries = handlers.get(event) ?? new Set<Handler>()
+      handlers.set(event, entries)
+      entries.add(handler)
+      return () => entries.delete(handler)
     },
     get(name: string) {
       return services[name]
@@ -155,13 +185,27 @@ function assemble(script: Script) {
     logger: { warn() {} },
   }
   const agent = makeAgent('a1', makeEvents(), () => mark('snapshot'))
+  live.set(String(agent.session.id), agent)
   const channel = createChannel(ctx as never, agent as never, {
     model: 'model-a',
     cwd: '/tmp/demo',
     provider: 'fake-provider',
     activity: false,
+    handle: handleFor(agent) as never,
   })
-  return { order, stamps, compaction, channel, agent, handlers }
+  const stream = (sessionId: string) => {
+    const source = async function* () {
+      yield { type: 'text-delta', text: 'abc' }
+      yield { type: 'reasoning-delta', text: 'de' }
+      yield { type: 'text-delta', text: 'fgh' }
+    }
+    const next = [...handlers.get('llm/stream') ?? []].reduceRight<() => AsyncIterable<unknown>>(
+      (next, handler) => () => handler({ purpose: 'compaction', sessionId }, next) as AsyncIterable<unknown>,
+      source,
+    )
+    return next()[Symbol.asyncIterator]()
+  }
+  return { order, stamps, compaction, channel, agent, handlers, emit, stream, live }
 }
 const toasts = (channel: { notifications: readonly { text: string }[] }) =>
   channel.notifications.map(item => item.text).join('\n')
@@ -272,6 +316,162 @@ const toasts = (channel: { notifications: readonly { text: string }[] }) =>
   const text = toasts(channel)
   check('scene7: no cancel toast for a settled compaction', !text.includes('已取消并切换会话'), text)
   check('scene7: compaction ran exactly once', compaction.calls.length === 1, String(compaction.calls.length))
+}
+
+// ==== 场景 8：/bg 后 Esc 返回的 resumeTo 不得中止原会话压缩 =================
+{
+  const { channel, agent, compaction, stream } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  check('scene8: manual compaction started', await settle(() => compaction.calls.length === 1))
+  const startedAt = channel.compaction?.startedAt
+  const summary = stream(agent.session.id)
+  await summary.next()
+  check('scene8: foreground summary chars are counted once', channel.compaction?.outputChars === 3)
+  const backgrounded = await channel.backgroundCurrent()
+  check('scene8: /bg parks the originating session', backgrounded.ok && backgrounded.backgroundedSessionId === agent.session.id)
+  check('scene8: /bg does not abort the summarizer', compaction.calls[0]?.abortedAt === undefined)
+  check('scene8: the fresh foreground has no old progress row', channel.compaction === undefined)
+  await summary.next()
+  check('scene8: background summary does not paint the fresh foreground', channel.compaction === undefined)
+  const returned = await channel.resumeTo(agent.session.id)
+  check('scene8: return reattaches the original live agent', returned.ok && channel.agentId === agent.id)
+  check('scene8: return does not abort the summarizer', compaction.calls[0]?.abortedAt === undefined)
+  check('scene8: return restores the original cancellable row', channel.compaction?.cancellable === true && channel.compaction.startedAt === startedAt)
+  check('scene8: return includes progress produced in the background', channel.compaction?.phase === 'summary' && channel.compaction.outputChars === 5)
+  await summary.next()
+  check('scene8: the original stream keeps updating after return', channel.compaction?.outputChars === 8)
+  channel.cancelCompact()
+  check('scene8: explicit cancellation after return reaches the original request', await settle(() => compaction.calls[0]?.abortedAt !== undefined))
+  check('scene8: explicit cancellation clears the restored row', await settle(() => channel.compaction === undefined))
+  channel.releaseContributions()
+}
+
+// ==== 场景 9：后台完成不得清掉另一个会话的新压缩 ============================
+{
+  const { channel, agent, compaction } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  await settle(() => compaction.calls.length === 1)
+  await channel.backgroundCurrent()
+  channel.cancelCompact()
+  check('scene9: cancelling an idle foreground leaves the background request alone', compaction.calls[0]?.abortedAt === undefined)
+  channel.compact()
+  check('scene9: another live agent can compact independently', await settle(() => compaction.calls.length === 2))
+  const foregroundRow = channel.compaction
+  const notices = channel.notifications.length
+  compaction.calls[0].finish()
+  await settle(() => compaction.calls[0].finished)
+  check('scene9: background completion does not clear foreground progress', channel.compaction === foregroundRow && foregroundRow !== undefined)
+  check('scene9: background completion does not announce success for the foreground', channel.notifications.length === notices)
+  channel.cancelCompact()
+  check('scene9: explicit cancel targets the foreground request', await settle(() => compaction.calls[1]?.abortedAt !== undefined))
+  check('scene9: the background request completed without cancellation', compaction.calls[0].abortedAt === undefined)
+  await channel.resumeTo(agent.session.id)
+  check('scene9: a finished background compaction is not resurrected on return', channel.compaction === undefined)
+  channel.releaseContributions()
+}
+
+// ==== 场景 10：离开压缩中的会话落定它，回到它则保留 =========================
+{
+  const { channel, agent, compaction, handlers, live } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  await settle(() => compaction.calls.length === 1)
+  await channel.backgroundCurrent()
+  // A real compaction has conversation content to summarize; empty fresh
+  // sessions are intentionally retired by live adoption instead of parked.
+  const freshId = channel.agentId
+  appendLiveEvents(live.get(freshId)!.session, makeEvents())
+  channel.compact()
+  await settle(() => compaction.calls.length === 2)
+  // Returning to the compacting session: what settles is the transaction of
+  // the session being LEFT (the fresh foreground), never the target's.
+  const returned = await channel.resumeTo(agent.session.id)
+  check('scene10: returning to the compacting session keeps its own transaction',
+    returned.ok && compaction.calls[0]?.abortedAt === undefined)
+  check('scene10: returning settles the compaction of the session left behind',
+    await settle(() => compaction.calls[1]?.abortedAt !== undefined))
+  check('scene10: the settle is announced as a switch cancellation',
+    toasts(channel).includes('已取消并切换会话'))
+  // Leaving it again for the other session settles the compaction it holds.
+  await channel.resumeTo(freshId)
+  check('scene10: switching away settles the compaction of the session left behind',
+    await settle(() => compaction.calls[0]?.abortedAt !== undefined))
+  check('scene10: the settled session publishes no progress row', channel.compaction === undefined)
+  // Both requests above are already settled by the switches, so disposal would
+  // have nothing left to abort. Park a NEW one and let disposal be the only
+  // thing that can end it.
+  await channel.resumeTo(agent.session.id)
+  channel.compact()
+  await settle(() => compaction.calls.length === 3)
+  await channel.backgroundCurrent()
+  check('scene10: the parked request is still running before disposal',
+    compaction.calls[2]?.abortedAt === undefined)
+  channel.releaseContributions()
+  check('scene10: owner disposal aborts parked compactions too',
+    await settle(() => compaction.calls[2]?.abortedAt !== undefined))
+  check('scene10: owner disposal removes compaction and session listeners', await settle(() =>
+    ['llm/stream', 'session/event', 'agent/disposed'].every(name => (handlers.get(name)?.size ?? 0) === 0)))
+}
+
+// ==== 场景 11：停止后台 Agent 会中止它的手动压缩 =============================
+{
+  const { channel, agent, compaction } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  await settle(() => compaction.calls.length === 1)
+  await channel.backgroundCurrent()
+  check('scene11: background stop succeeds', await channel.stopBackgroundAgent(agent.session.id))
+  check('scene11: disposed background agent cannot keep compacting', await settle(() => compaction.calls[0]?.abortedAt !== undefined))
+  check('scene11: disposal does not publish a cancellation for another session', !toasts(channel).includes('压缩已取消'))
+  channel.releaseContributions()
+}
+
+// ==== 场景 12：自动压缩没有手动事务，仍由回合与宿主事件管理 =================
+{
+  const { channel, agent, compaction, emit, stream } = assemble({ kind: 'hang-until-abort' })
+  emit('session/event', agent.session, ev('compaction/start', {}))
+  check('scene12: automatic compaction stays non-cancellable', channel.compaction?.cancellable === false)
+  const summary = stream(agent.session.id)
+  await summary.next()
+  check('scene12: automatic progress still uses the normal projector', channel.compaction?.outputChars === 3)
+  channel.cancelCompact()
+  check('scene12: explicit manual cancellation cannot stop an automatic compaction', channel.compaction?.cancellable === false && compaction.calls.length === 0)
+  emit('session/event', agent.session, ev('compaction/end', {}))
+  check('scene12: host completion clears automatic progress', channel.compaction === undefined)
+  channel.releaseContributions()
+}
+
+// ==== 场景 13：/fork 只落定来源会话的压缩 ===================================
+{
+  const { channel, compaction, live } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  await settle(() => compaction.calls.length === 1)
+  await channel.backgroundCurrent()
+  appendLiveEvents(live.get(channel.agentId)!.session, makeEvents())
+  channel.compact()
+  await settle(() => compaction.calls.length === 2)
+  const forked = await channel.forkSession()
+  check('scene13: /fork succeeds', forked === true, toasts(channel))
+  check('scene13: /fork cancels the source session compaction',
+    await settle(() => compaction.calls[1]?.abortedAt !== undefined))
+  check('scene13: /fork leaves a parked session compaction alone',
+    compaction.calls[0]?.abortedAt === undefined)
+  channel.releaseContributions()
+}
+
+// ==== 场景 14：宿主只发出 legacy compaction/end 时也要清掉手动行 ===========
+{
+  const { channel, agent, compaction, handlers } = assemble({ kind: 'hang-until-abort' })
+  channel.compact()
+  await settle(() => compaction.calls.length === 1)
+  check('scene14: the manual row is open', await settle(() => channel.compaction?.cancellable === true))
+  // On a host whose translator accepts the bracket the projector folds the
+  // event too; one that drops it leaves the transaction listener as the only
+  // consumer. Drive that listener alone so the assertion covers that host.
+  const listeners = [...(handlers.get('session/event') ?? [])]
+  check('scene14: the transaction listener is the newest session subscriber', listeners.length >= 2)
+  listeners[listeners.length - 1]!(agent.session, ev('compaction/end', {}))
+  check('scene14: the legacy end bracket clears the manual row', await settle(() => channel.compaction === undefined))
+  check('scene14: the bracket does not cancel the request', compaction.calls[0]?.abortedAt === undefined)
+  channel.releaseContributions()
 }
 
 process.exit(failed)

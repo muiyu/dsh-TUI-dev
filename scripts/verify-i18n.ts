@@ -45,7 +45,7 @@ const PLATFORM_TEXT_SOURCE = 'src/backends/shared/platform-text.ts'
 //   tree-filter-* src/screens/SessionTree.tsx      t(`tree-filter-${filter}`)
 //   tree-kind-*   src/screens/SessionTree.tsx      t(`tree-kind-${entry.kind}`)
 //   preset-name-* / preset-desc-*   src/dsh-adapter/channel/model-actions.ts   tOr(`preset-name-${presetDisplayId(preset.id)}`) — built-in preset display text
-const DYNAMIC_PREFIXES = ['cmd-desc-', 'traj-sort-', 'traj-proj-', 'logo-drift-', 'spinner-verb-', 'tree-filter-', 'tree-kind-', 'preset-name-', 'preset-desc-', 'agent-message-delivery-', 'agent-message-via-']
+const DYNAMIC_PREFIXES = ['cmd-desc-', 'traj-sort-', 'traj-proj-', 'logo-drift-', 'spinner-verb-', 'tree-filter-', 'tree-kind-', 'preset-name-', 'preset-desc-', 'agent-message-delivery-', 'agent-message-via-', 'team-status-']
 
 let failures = 0
 function fail(msg: string) {

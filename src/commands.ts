@@ -25,6 +25,16 @@ export interface CommandCompletionNode {
   tag?: string
   /** Optional i18n key; plugin nodes normally rely on fallback text. */
   descriptionKey?: string
+  /**
+   * Mark this row as a syntax EXAMPLE rather than a candidate: it spells out a
+   * shape, not something this person typed. Tab therefore hands the draft back
+   * untouched instead of writing the placeholder in, and Enter runs the draft as
+   * typed — at the bare argument position that is the subcommand itself (its
+   * usage line), and once a spec is typed it is that spec. `/plugin install `
+   * shows the three shapes while neither Tab nor Enter can insert or install the
+   * placeholder, and a real spec that merely starts like one is never swallowed.
+   */
+  example?: true
 }
 
 export type CommandChildren = (canonicalPath: readonly string[]) => readonly CommandCompletionNode[]
@@ -81,6 +91,7 @@ export const LOCAL_COMMANDS: LocalCommand[] = [
   { name: 'migrate', description: 'Import conversations from other coding agents (claude-code / codex / omp / zcode / grok-build)' },
   { name: 'init', description: 'Create AGENTS.md in the working directory' },
   { name: 'agents', description: 'Show subagents of this session' },
+  { name: 'team', description: 'Agent Teams: show status, or switch on / off (the team bundle)' },
   { name: 'jobs', description: 'Show background jobs of this session' },
   { name: 'panel', description: 'Side panel: toggle / focus / zoom / switch panels' },
   // Model / display
@@ -205,6 +216,9 @@ const LOCAL_COMMAND_REQUIREMENTS: ReadonlyMap<string, LocalCommandRequirement> =
   // plugin service), so it stays on the `dsh` default: stated here rather than
   // inherited from the unlisted fallback.
   ['plugin', 'dsh'],
+  // /team switches the DSH profile's Agent Teams bundle through the same
+  // service; another kernel must not rewrite the DSH profile.
+  ['team', 'dsh'],
 ])
 
 /** The requirement of one built-in command name (unlisted → `dsh`). */
@@ -506,6 +520,11 @@ export function completeCommands(
     if (completionToken === undefined || !tokenOk(completionToken)) return []
     const path = [...tokens, completionToken]
     const commandLine = `/${path.join(' ')}`
+    // An example row accepts nothing of its own: Tab gets back the draft it was
+    // given, and Enter runs that same line. Empty argument ⇒ the line is the
+    // bare subcommand (its usage line); a typed spec ⇒ it is the spec itself,
+    // so `/plugin info /p` still inspects `/p` instead of losing it.
+    const example = candidate.example === true
     return [{
       name: path.join(' '),
       description: candidate.description,
@@ -514,8 +533,8 @@ export function completeCommands(
       ...(candidate.tag === undefined && candidate.aliases?.length
         ? { tag: `aliases: ${candidate.aliases.join(', ')}` }
         : candidate.tag === undefined ? {} : { tag: candidate.tag }),
-      replacement: `${commandLine} `,
-      commandLine,
+      replacement: example ? input : `${commandLine} `,
+      commandLine: example ? input : commandLine,
     }]
   })
 }

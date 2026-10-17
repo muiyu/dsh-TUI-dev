@@ -387,6 +387,21 @@ dsh plugin --profile dsh-tui add @deepseek-harness-tui/dsh-tui@latest
 自定义端点同时检查 `DEEPSEEK_BASE_URL`。若使用 `deepseek-account` 或订阅模型，
 用 `/auth status` 检查登录状态，必要时重新运行 `/auth login <provider>`。
 
+### 浏览器能访问、dsh-tui 连不上自建 HTTPS 端点（自签证书 / 私有 CA）
+
+内网自建的 LLM token 服务器常用 Caddy、mkcert、Step CA 等签发 HTTPS 证书，这类根证书不在 Node.js 内置的 Mozilla CA 列表里。于是浏览器和系统级 `curl` 都能正常访问，dsh-tui 切到该 provider 后却在 TLS 握手阶段失败，报 `self-signed certificate in certificate chain` 或 `UNABLE_TO_VERIFY_LEAF_SIGNATURE`。
+
+原因是 dsh-tui 的 HTTP 请求跑在 Node.js 的 TLS 层上，而 Node.js 只信任两样东西：编译时打包的 Mozilla CA bundle，以及环境变量 `NODE_EXTRA_CA_CERTS` 指向的 PEM 文件（与内置列表合并）。macOS Keychain 里的「信任」设置对 Node.js 进程无效——Node 不调用系统的 Security.framework，浏览器和 `curl` 用的信任链跟它无关。
+
+解决办法是把根证书导出成 PEM，在启动 dsh-tui 之前设置该变量：
+
+```sh
+export NODE_EXTRA_CA_CERTS=/path/to/your-ca-root.pem
+dsh-tui
+```
+
+注意 `NODE_EXTRA_CA_CERTS` 属于 DSH 启动器的 bootstrap 保护变量：任何 `.env` 文件（项目目录的 `.env` 与 `~/.dsh/.env` 都算）都不允许设置它，写进去会在启动时直接报错退出并提示改用 `export`，只能由启动 dsh 的那个 Shell 环境继承。同组受保护的证书 / TLS 变量还有 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`NODE_TLS_REJECT_UNAUTHORIZED` 等。
+
 ### 工作状态行重复
 
 检查 profile 是否曾单独添加 `dsh-working-activity`。保留本包 patch 自动插入的

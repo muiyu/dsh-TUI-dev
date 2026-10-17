@@ -355,6 +355,12 @@ claim。
   system CLI with a pool hook), both implemented confirmation policies (confirm, trusted-source),
   capability/grants declaration, the refusals, and resume binding semantics"（automated）
 
+**这一层不校验 `install.executor` 的取值**：宿主不认识的执行器不是拒绝（见接缝十四的"声明形状"），
+形状校验也不查执行器表，所以**没有** `invalid-backend-install-executor-unknown` 这条反例——它在
+profile 层没有可红的期望，按"不能红的用例不写"的纪律就不写。这条语义由**宿主侧**承重：
+`scripts/verify-backend-registry.ts` 有一条用例逐字写着「an executor this host does not implement
+registers as "no install surface"」（不抛错、不开向导、配方保留）。
+
 ### TUI-TRUST-001 Trust disclosure
 
 当前 profile 为 `trusted-in-process`。Manifest permission 用于兼容性、授权提示和
@@ -612,6 +618,27 @@ ctx.inject(['tuiSettingsSections'], (settingsCtx) => {
   根，所以主包把自己的工作状态行插件以
   `@deepseek-harness-tui/dsh-tui/working-activity` 子路径再导出后挂载。你的插件
   如果也要被别的 bundle 组合，提供同样的显式子路径导出。
+
+### preset 内的行（实验性）
+
+Agent preset 里的行（如 `standard` 的 `compaction-basic`）运行在 preset 自己的
+realm 里，按 id 的 patch 够不到。dsh-TUI 注册的 preset（`standard` / `ptc` /
+`minimal` / `cordis` / `liangshen`）改用 preset-patch 行：
+
+```yaml
+- insert:
+    - id: my-plugin-standard
+      name: '@deepseek-harness-tui/dsh-tui/preset-patch'
+      config:
+        preset: standard
+        config:
+          compaction-basic: { auto: false }
+```
+
+- `config.config` 把 preset 里的行 id 映射到替换后的 `config`，语义同上面的覆盖行
+  （**整块替换**）；嵌套在 group 里的行也能命中，找不到的 id 会告警。
+- 与插件加载顺序无关；同一 preset 的多行合并，同一行 id 后者覆盖前者。
+- profile 自己声明的 preset 归 profile 所有，不受影响。
 
 ## 接缝八：插件全屏场景（tuiScenes）
 
@@ -995,8 +1022,8 @@ ctx.effect(() => () => dispose?.())
 [说明 0009](../notes/0009-backend-contribution.md)。
 
 **当前状态：`alpha`，不承诺。** 类型面、definition、contract profile、conformance
-与**准入链路**（清单 → registry → descriptor）都已可用，第三方 bundle 的声明过得了准入；
-仍未做的是把**已挂载 bundle** 的声明接进注册表与 picker 的那一步（装链路，见本节末）。
+与**准入链路**（清单 → registry → descriptor）、**装配链路**（装 → 重启 → 进 kernel picker）
+都已可用，第三方 bundle 的声明过得了准入，也会在重启后出现在 picker 里。
 
 ### 声明形状
 
@@ -1020,6 +1047,15 @@ ctx.effect(() => () => dispose?.())
   贡献声明其中之一在准入处被拒（`BACKEND_ID_RESERVED`）。
 - `label` **只收字面量**——宿主 i18n 键是宿主的词表，贡献不许借它说话。
 - `shortLabel` 必填；`product`、`install`、`unloadExport`、`confirmation` 可选。
+- `install` 是**安装配方**，不是包名：`executor` 说的是"怎么装"（宿主实现的一道程序），
+  `specifier` 说的是"装什么"——**版本就钉在它里面**（`@scope/name@<version>`，原样交给执行器，
+  宿主不再拼一次），`version` 是同一个钉的可读副本（确认面板显示、宿主校验用）。**取值集合
+  属于宿主**——今天只实现 `pnpm-profile-add`（在 profile 根跑一次 `pnpm add <specifier>`）；
+  宿主**不认识的执行器读作"没有安装面"**：bundle 照常注册、配方原样保留，只是那一行退回
+  检测自己的 hint、不开向导，**不是拒绝**。不写 `install` 同样是一等公民（系统 CLI 形态：
+  用户自己的二进制就是依赖）。取值集合**只增不删**：加一个执行器是加法，不改本坐标。这条
+  配方是给后端**自己的运行时依赖**用的，**不是** bundle 的发行方式——装 bundle 走
+  `/plugin install`（收包名 / 路径 / git URL），与本字段无关。
 - 未知字段一律拒（`nativeKey`、`inTree` 之类 in-tree 私有项因此进不来）；声明里
   的文本按不可信输入净化：剥控制字符、按 terminal cell 截断。
 - `confirmation` 是**请求**，不是自授豁免：缺省 `confirm`（宿主始终询问）；`trusted-source`
@@ -1079,7 +1115,7 @@ goals / channels / permissions 一类名字）。
 与恢复目标的传递方式不在协议内。安全模式的「重试正常启动」是唯一例外（一次性 env
 `DSH_TUI_RESUME_RETRY`，撤销降级为告警 + 冷启动），它同样不进协议。
 
-### W-2：准入链路已接线，装链路未做
+### W-2：准入链路（声明过得了准入）
 
 **声明过得了准入。** 前五道接缝之外，`Backend` 这一族在 W-2（Stage C 第一段）里接完了
 它的准入链路：
@@ -1095,13 +1131,45 @@ goals / channels / permissions 一类名字）。
   只读、无副作用）：new 内核路径按 live lifecycle 证据，默认的 `legacy` 路径按挂载拓扑里的同一
   个探针；探针缺席或答不出"可准入"就不发布并说明原因。
 
-**仍未做**：把**已挂载 bundle** 的 `x-dsh-tui` 声明读出来接进 `registerBackend()` 与
-picker——今天注册表只有内置种子，所以"装一个第三方后端 bundle，重启后它出现在 kernel
-picker 里"这条端到端流程仍要等 `/plugin` 的装链路落地。在那之前，本节描述的形状可以被
-准入，但还进不了 picker。
+### 装配链路（D-1）：装 → 重启 → 进 picker
+
+**装链路也接线了。** 准入保证"声明过得了"，装配保证"它真的出现在 picker 里"。一个后端 bundle
+要进 picker，除上面的声明形状外还要满足三件事：
+
+- **它是 profile 的一层**：`package.json` 声明 `dsh.bundle`，于是安装时它被写进 profile 清单的
+  `dsh.profile.bundles`（`/plugin install` 与 `dsh plugin add` 同一条路）。宿主扫的就是这份名单——
+  只装依赖、不成为一层的包不会被组合，也就不会被装配。
+- **清单在包根**：启动时按 `dsh.profile.bundles` 逐个包，用 Loader 自己的 ESM resolver 解析它的
+  入口，再从入口**往上找到确立包根的那个 `package.json`**，只有**同目录**的 `dsh-plugin.json`
+  才算数（#1568 的身份规则，深层目录里的野清单不得冒领外层包的身份）。
+- **实现导出叫 `backend`**：`backendExport` 是 in-tree 私有项，声明里没有它的位置，所以宿主按
+  `backend` 这个约定名从包入口模块的命名空间里取 handler（`assertBackendHandler()` 断言形状），
+  `spec.unloadExport` 也是从同一个命名空间取。**模块只在真的选中该后端时才 import**——装了没选
+  的后端不会被执行。
+
+当前一个 bundle 只接一个 `Backend` 声明：固定的 `backend` 导出只能绑定一个 handler 身份，
+多个声明会明确拒绝。handler 由 `assertBackendHandler()` 校验，且其 `id` 必须等于 `spec.id`，
+之后才可用于会话、恢复与数据目录。清单也须通过规范投影，包括贡献身份的唯一性。
+等待授权的条目仍注册身份，但不参与内核探测，也不能被加载；启动参数或配置显式指定它同样会失败。
+
+**时序是硬约束**：这份扫描**同步**发生在后端选择的**注册表成员判定之前**。DSH profile 路径的
+Config Schema 先做语法校验，保留合法的第三方 id；`apply` 装配后才查询该 id 是否已注册。
+独立入口 `dsh-tui` 先准备中性的 Loader/模块解析根，装配后决定最终内核，再用同一个值选择
+DSH 专用服务、完整/轻量 profile 与入口 slot；发现前的路由只用于宿主不可用时的回退。
+`apply` 再装配时，同一组合上的第二遍是 no-op。过早做成员判定不是"晚点出现"，而是把选择误读成
+未知值。装配读的是**文件**（profile 清单）与 Loader 的 resolver，不依赖任何 bundle 行已被激活。
+行为回归分别由 `verify-backend-assembly`、`verify-backend-config` 与 `verify-backend-host` 覆盖。
+
+**判不了就说出来**：Loader 没有 Node internals（拿不到它自己的 resolver）时，宿主**不猜**组件身份，
+一个包都不注册并给出一行原因；某个清单读不懂、投影不出、准入拒绝时，宿主给一行**归属到该 bundle**
+的告警，其余 bundle 照常装配——一个坏声明拖不垮别的贡献，也不会静默消失。
+
+**不承诺**：装了但**没重启**就期望 picker 出现，不是承诺（承诺是装 → 重启 → 出现）。
 
 完整口径与逐条门禁见
-[说明 0009](../notes/0009-backend-contribution.md) 的「Wired (W-2)」节。
+[说明 0009](../notes/0009-backend-contribution.md) 的「Wired (W-2)」与「Assembled (D-1)」两节；
+可照抄的实例是仓内夹具 `scripts/fixtures/third-party-backend/`（按公开面写的第三方 bundle，
+`scripts/verify-backend-assembly.ts` 把它装进一次性 profile 跑完整装配链）。
 
 ## 命名与发布规范
 

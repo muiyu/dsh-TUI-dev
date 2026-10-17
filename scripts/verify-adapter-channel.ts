@@ -184,6 +184,11 @@ assert.equal(projection.version, 7)
 assert.equal(projection.rows.length, 2)
 assert.equal(projection.rows[0]?.text, 'hello')
 assert.equal(JSON.stringify(projection).includes('function'), false, 'projection must be JSON-safe')
+// An Agent Teams peer row keeps its sender: a renderer can name who wrote it.
+assert.deepEqual(
+  projectChannelRows([{ id: 9, kind: 'user', label: 'team-message', sender: 'reviewer', text: 'diff ok' }] as never),
+  [{ id: 9, kind: 'user', text: 'diff ok', label: 'team-message', sender: 'reviewer' }],
+)
 const state = projectChannelState(channel as never)
 assert.equal(state.agentId, 'session-1')
 assert.equal(state.version, 7)

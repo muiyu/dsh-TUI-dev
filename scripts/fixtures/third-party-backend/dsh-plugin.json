@@ -1,0 +1,47 @@
+{
+  "$schema": "urn:dsh-std:community-draft:dsh-plugin:0.15",
+  "manifestVersion": "0.15",
+  "id": "com.example.echo-backend",
+  "name": "Echo Backend",
+  "version": "0.1.0",
+  "facets": {
+    "host": {
+      "entry": "backend.js",
+      "apiVersion": "v1alpha1"
+    }
+  },
+  "requires": {
+    "contracts": []
+  },
+  "permissions": [],
+  "contributes": {
+    "commands": [],
+    "x-dsh-tui": [
+      {
+        "apiVersion": "tui.dsh/v1alpha1",
+        "kind": "Backend",
+        "id": "com.example.echo-backend",
+        "name": "echo_backend",
+        "spec": {
+          "id": "echo-agent",
+          "label": {
+            "text": "Echo Agent"
+          },
+          "shortLabel": "Echo",
+          "product": "echo",
+          "capabilities": [],
+          "grants": [],
+          "unloadExport": "closeEchoPool",
+          "confirmation": {
+            "policy": "confirm"
+          }
+        }
+      }
+    ]
+  },
+  "subscriptions": [],
+  "license": "MIT",
+  "source": {
+    "repository": "https://example.com/dsh-tui-fixtures/echo-backend"
+  }
+}

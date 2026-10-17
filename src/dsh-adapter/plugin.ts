@@ -16,6 +16,8 @@ import { EDITABLE_CONFIG_KEYS } from '../settings/definitions.js'
 import { kernelEntriesOf } from '../components/kernelCatalog.js'
 import { openBackendStartup, prepareBackendStartup, probeKernels, installSurfaceFor } from './backends.js'
 import { backendLabel, isBackendIdSyntax, isRegisteredBackend, listBackends, listOfferedBackends, loadBackend, parseBackendChoice, unloadBackends } from './backend-registry.js'
+import { createPluginInstallEntry } from './plugin-install.js'
+import { createPluginManageEntry } from './plugin-manage.js'
 import { formatSessionRef } from '../agent/refs.js'
 import type { AgentEvent } from '../agent/events.js'
 import type { AgentSession } from '../agent/session.js'
@@ -79,6 +81,8 @@ import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
 import { attachSessionListMetadata } from './session-list-metadata.js'
 import { createActivityStore } from './activity-store.js'
 import { createContextOccupancyStore } from './context-occupancy.js'
+import { createTeamRosterStore } from './team-roster.js'
+import { createTeamCommandEntry, filterTeamReplacedTools } from './team-mode.js'
 import { getHostToastStore, type TuiToastRuntime } from './toast.js'
 import { getHostShortcuts, type TuiShortcutRuntime } from './shortcuts.js'
 import { getHostThemes, type TuiThemeHost, type TuiThemeRuntime } from './themes.js'
@@ -88,6 +92,7 @@ import { createLocalWorkspaceRuntime, getHostWorkspaceRuntime } from './workspac
 import { getHostSettingsSections, getLocalSettingsSectionsHost, type TuiSettingsField, type TuiSettingsSectionsRuntime } from './settings-sections.js'
 import { compositionRoot, withHostRootCapability } from './host-access.js'
 import { armAdmissionLoader } from './admission-loader.js'
+import { assembleBackendsFromProfile } from './backend-assembly.js'
 import { applyConfiguredSidePanelPanels, applySidePanelPanelsFromSettings } from './panels.js'
 import { disposeRootSettled } from './root-dispose.js'
 import { render, ThemeProvider, AlternateScreen } from '../ui.js'
@@ -411,8 +416,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // persistent shell: bash on POSIX, pwsh on Windows). Filter only that preset
     // at the final assembly boundary. Reading the session on every assembly also
     // makes blank-session /preset switches and resumed sessions behave correctly.
+    // Agent Teams is decided at the same boundary: presets keep their legacy
+    // delegation rows, and a request that carries `spawn_teammate` drops
+    // `subagent` / `subagent_fork` (team-mode.ts), so a team bundle switched
+    // at run time reaches the sessions already running.
     dshCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
-      const assembled = await next()
+      const assembled = filterTeamReplacedTools(await next())
       const presetId = context.agent === undefined ? undefined : runningPresetOf(context.agent.session)
       return filterMinimalPresetTools(assembled, presetId)
     })
@@ -549,6 +558,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   }
   // Admit third-party activations from their package-root `dsh-plugin.json`.
   armAdmissionLoader(ctx)
+  // Stage D-1: the backends installed bundles declare join the registry *here*,
+  // before anything below parses a backend choice (`parseBackendChoice` reads the
+  // registry for membership, so an id registered later reads as unknown: dsh plus a
+  // warning). Synchronous on purpose — a bundle's own rows are composed after this
+  // one, so waiting for them would be waiting past the parse. This is the caller
+  // notes 0009's "Wired (W-2)" section was still missing.
+  assembleBackendsFromProfile(ctx)
   // The in-process DSH kernel mounts before the profile's workspace providers
   // exist: a provider URI resolves in `attachDsh`, and an unresolvable one
   // fails the startup session there instead of the mount.
@@ -695,8 +711,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
    * Whether a Config row or DSH_TUI_BACKEND overrides the selector's
    * remembered kernel. The selector then says so: a switch still restarts
    * onto the chosen kernel, but the next plain launch follows the override.
+   * Only a registered Config choice pins: the schema keeps syntactically
+   * valid but uninstalled ids too, which must not prevent a memory fallback.
    */
-  const backendPinned = config.backend !== undefined
+  const backendPinned = configuredBackend !== undefined
     || (rawBackend !== undefined && rawBackend.trim() !== '')
   // A remembered kernel whose backend cannot open (its SDK uninstalled, its
   // session store unreadable, …) must not kill the boot: without an explicit
@@ -867,6 +885,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // empty and the channel falls back to the last-request sample — as does a
   // non-DSH session, whose id the DSH meter never projects.
   const contextOccupancyStore = createContextOccupancyStore(ctx)
+  // Read side of the Agent Teams `agentTeam` projection, for the same TDZ
+  // reason; empty unless the profile mounts the team service.
+  const teamRosterStore = createTeamRosterStore(ctx)
   // The channel holds a backend session; this DSH one owns the resolved
   // handle (disposed by the binding when a later adoption replaces it).
   let startupSession: AgentSession
@@ -935,6 +956,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // change, so a resumed session reads one baseline at bind time.
     contextPressure: contextOccupancyStore,
     seedContextOccupancy: session => contextOccupancyStore.seed(session),
+    team: teamRosterStore,
+    seedTeam: session => teamRosterStore.seed(session),
     // A RESUMED session keeps its persisted header cwd (issue #96 review):
     // pre-upgrade sessions recorded the launch directory, and re-resolving
     // from the current launch directory would split @ expansion / file
@@ -2404,6 +2427,30 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // whichever row the user picked, looked up by id — the manifest says what to
     // install and with which executor, this host holds the actions.
     onResolveSdkInstall: installSurfaceFor,
+    // `/plugin install <spec>` (C-4): the write path. The wiring lives beside
+    // the flow (`createPluginInstallEntry`) so a regression can drive the real
+    // feed load, declaration read and profile-relative path resolution with a
+    // fixture context. `undefined` ⇒ not an install form, or no service to
+    // install through; the screen then runs the read-only report instead.
+    onPluginInstall: createPluginInstallEntry(ctx, {
+      ownVersion: installedTuiVersion(),
+      profileName: profile ?? resolveDshProfileName(),
+    }),
+    // `/plugin remove|enable|disable` (C-5): the lifecycle write path. Wired the
+    // same way and for the same reason — the entry is where the real profile, the
+    // declaration read and the data directory meet, so a regression can drive
+    // them with a fixture context. `undefined` ⇒ not one of those forms, or no
+    // service to act through; the screen then runs the read-only report.
+    onPluginManage: createPluginManageEntry(ctx, {
+      profileName: profile ?? resolveDshProfileName(),
+    }),
+    // `/team [status] | on | off`: the Agent Teams bundle through the same
+    // lifecycle flow (team-mode.ts).
+    onTeamCommand: createTeamCommandEntry(ctx, {
+      profileName: profile ?? resolveDshProfileName(),
+      // The host reports `unknown` when it has no version: read the installed one.
+      kernelVersion: entrySlot?.kernelVersion === 'unknown' ? undefined : entrySlot?.kernelVersion,
+    }),
     kernelPinned: backendPinned,
     // Only a `dsh --profile <name>` launch has a profile installation for
     // `/update` to act on; source checkouts and `--config` overlays get the
