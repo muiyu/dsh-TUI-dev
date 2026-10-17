@@ -146,6 +146,11 @@ async function runInEntry(kernelBeforeHost: KernelBackendId): Promise<void> {
   ])
   markBoot('entry-modules')
   const ctx: Context = root?.ctx ?? new (await import('@deepseek-ai/cordis')).Context()
+  // Plugins use root capabilities while they activate: hold the TUI's guard
+  // back until composition arms it (./host-access.ts). Before anything resolves
+  // the composition root (the assembly below does): a root first seen undeferred
+  // is guarded for good, and DSH's base rows would fail on their own root effects.
+  const releaseRootGuard = root === undefined ? undefined : deferRootCapabilityGuard(ctx)
   const env = process.env
   // D-1: this entry decides the kernel *before* `apply` runs, and that decision is
   // registry membership — `entryKernel` drops an id no backend answers for, and a
@@ -183,9 +188,6 @@ async function runInEntry(kernelBeforeHost: KernelBackendId): Promise<void> {
   })
   // Only a host root gets a composition (DSH without one was delegated above).
   const slot = root === undefined ? undefined : createEntrySlot(kernel === 'dsh', root.kernelVersion)
-  // Plugins use root capabilities while they activate: hold the TUI's guard
-  // back until composition arms it (./host-access.ts).
-  const releaseRootGuard = slot === undefined ? undefined : deferRootCapabilityGuard(ctx)
   try {
     // `entryKernel`: the runtime must not re-resolve the kernel — its rebuilt Config
     // lacks the profile patch's row this route was decided on (the entry read that

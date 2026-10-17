@@ -566,6 +566,95 @@ await root.fiber.dispose()
   await entryRoot.fiber.dispose()
 }
 
+// The entry's backend assembly resolves the composition root before the kernel
+// is chosen. It must run inside the deferral: a root first seen undeferred is
+// guarded for good, and DSH 0.2.0-rc.2's first Remote service then fails on
+// `ctx.root.accessor('invocation')` (a root effect) in its own activation.
+// The root reads a profile that lists one installed bundle, so the assembly
+// reaches `compositionLoader` (and the composition root) rather than returning
+// early; the undeferred control shows the check can fail.
+{
+  const { armRootCapabilityGuard, deferRootCapabilityGuard } = await import('../src/dsh-adapter/host-access.js')
+  const { assembleBackendsFromProfile } = await import('../src/dsh-adapter/backend-assembly.js')
+  const { mkdtempSync, readFileSync, rmSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const { pathToFileURL } = await import('node:url')
+  const profileDir = mkdtempSync(join(tmpdir(), 'dsh-tui-lifecycle-profile-'))
+  writeFileSync(join(profileDir, 'package.json'), JSON.stringify({ dsh: { profile: { bundles: ['example-backend-bundle'] } } }))
+  const rowAfterAssembly = async (deferred: boolean): Promise<string> => {
+    const entryRoot = new Context()
+    ;(entryRoot as { baseUrl?: string }).baseUrl = pathToFileURL(profileDir).href + '/'
+    const release = deferred ? deferRootCapabilityGuard(entryRoot) : undefined
+    try {
+      const assembled = assembleBackendsFromProfile(entryRoot)
+      if (assembled.scanned.length !== 1) return `assembly scanned ${assembled.scanned.length} bundle(s)`
+      armRootCapabilityGuard(entryRoot)
+      let result = 'allowed'
+      await entryRoot.plugin({ name: 'dsh-remote-row', apply(ctx: Context) {
+        try { ctx.root.accessor('invocation', { get: () => undefined }) } catch (error) { result = error instanceof Error ? error.message : String(error) }
+      } })
+      return result
+    } finally {
+      release?.()
+      await entryRoot.fiber.dispose()
+    }
+  }
+  try {
+    const undeferred = await rowAfterAssembly(false)
+    check('undeferred backend assembly guards the root for good (control)', undeferred.endsWith('is unavailable from a plugin activation'), undeferred)
+    const deferred = await rowAfterAssembly(true)
+    check('deferred guard: backend assembly leaves DSH rows their root effects', deferred === 'allowed', deferred)
+  } finally {
+    rmSync(profileDir, { recursive: true, force: true })
+  }
+
+  // The order inside `runInEntry` is not reachable without a host dsh: read it
+  // from the syntax tree. The defer is the statement right after `ctx` is
+  // bound, so nothing (whatever it is called) can resolve the composition root
+  // first; comments and other functions' text cannot stand in for it.
+  const { default: ts } = await import('typescript')
+  const entryPath = new URL('../src/dsh-adapter/host-entry.ts', import.meta.url)
+  const source = ts.createSourceFile(entryPath.pathname, readFileSync(entryPath, 'utf8'), ts.ScriptTarget.Latest, true)
+  const runInEntry = source.statements.find((node): node is import('typescript').FunctionDeclaration =>
+    ts.isFunctionDeclaration(node) && node.name?.text === 'runInEntry')
+  const statements = runInEntry?.body?.statements ?? ts.factory.createNodeArray()
+  const bindsCtx = (statement: import('typescript').Statement): boolean => ts.isVariableStatement(statement)
+    && statement.declarationList.declarations.some(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'ctx')
+  const ctxAt = statements.findIndex(bindsCtx)
+  const next = statements[ctxAt + 1]
+  // The call counts only where a host root reaches it: a conditional expression
+  // or `if` on `root` only on its root-present branch; other conditionals'
+  // branches, the right of a short circuit and deferred functions not at all.
+  const rootPresentWhen = (condition: import('typescript').Expression): boolean | undefined => {
+    if (!ts.isBinaryExpression(condition) || !ts.isIdentifier(condition.left) || condition.left.text !== 'root'
+      || !ts.isIdentifier(condition.right) || condition.right.text !== 'undefined') return undefined
+    if (condition.operatorToken.kind === ts.SyntaxKind.EqualsEqualsEqualsToken) return false
+    if (condition.operatorToken.kind === ts.SyntaxKind.ExclamationEqualsEqualsToken) return true
+    return undefined
+  }
+  const shortCircuits = new Set([ts.SyntaxKind.AmpersandAmpersandToken, ts.SyntaxKind.BarBarToken, ts.SyntaxKind.QuestionQuestionToken])
+  let defers = false
+  const visit = (node: import('typescript').Node): void => {
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'deferRootCapabilityGuard'
+      && node.arguments.length === 1 && ts.isIdentifier(node.arguments[0]!) && node.arguments[0].text === 'ctx') defers = true
+    else if (ts.isConditionalExpression(node)) {
+      const present = rootPresentWhen(node.condition)
+      if (present !== undefined) visit(present ? node.whenTrue : node.whenFalse)
+    } else if (ts.isIfStatement(node)) {
+      const present = rootPresentWhen(node.expression)
+      if (present !== undefined) {
+        const branch = present ? node.thenStatement : node.elseStatement
+        if (branch !== undefined) visit(branch)
+      }
+    } else if (ts.isBinaryExpression(node) && shortCircuits.has(node.operatorToken.kind)) visit(node.left)
+    else if (!ts.isFunctionLike(node)) ts.forEachChild(node, visit)
+  }
+  if (ctxAt !== -1 && next !== undefined) visit(next)
+  check('host entry defers the root guard right after binding its root', defers,
+    ctxAt === -1 ? 'no `ctx` binding in runInEntry' : next?.getText(source) ?? 'nothing after the binding')
+}
+
 // DSH's agent-team service registers its projection through
 // `ctx.root.sessionProjections`. Behind the installed guard that call rides
 // the calling plugin's fiber (unloading it drops the key), while the root's

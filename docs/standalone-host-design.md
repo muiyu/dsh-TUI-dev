@@ -129,7 +129,7 @@ Loader 能求值（只转发 `DSH_TUI_BACKEND` 的写法与入口已排的环境
   realpath 用 `createRequire` 解析），不能用本包 peer 依赖的副本，否则出现第二个 Cordis 实例。
 - **环境变量先于组合**：`cordis.patch.yml` 的 `dsh-tui` 行用 `!!js process.env.X` 读 `DSH_TUI_*`，
   组合时求值，所以入口要在组合前设好；`loadLayeredEnv('dsh')` 会把 `.env` 层写进 `process.env`。
-- **根能力守卫**（`HOST_DEVIATIONS` 的 `defer-root-guard`）：守卫在屏幕挂载期间关闭；组合开始后
+- **根能力守卫**（`HOST_DEVIATIONS` 的 `defer-root-guard`）：守卫从入口绑定根起，到屏幕挂载期间一直关闭；组合开始后
   由第一个 TUI 行的激活装上（与 profile 路径一致），没有 TUI 行激活则在组合结算时装上。
 
 ### 4.4 进程所有权与退出

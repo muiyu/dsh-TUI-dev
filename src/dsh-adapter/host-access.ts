@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context, Fiber } from '@deepseek-ai/cordis'
+import { logForDebugging } from '../utils/debug.js'
 
 /**
  * Recover the concrete Cordis service for host-only adapters.
@@ -184,6 +185,8 @@ const deferredGuardRoots = new WeakSet<object>()
  * the guard would refuse. Fiber tracking starts at once either way.
  */
 export function deferRootCapabilityGuard(root: Context): () => void {
+  // Too late: a root seen undeferred already carries the guard for good.
+  if (trackedRoots.has(root as object)) logForDebugging('dsh-tui: the root-capability guard was deferred after the composition root was resolved; it is already installed')
   deferredGuardRoots.add(root as object)
   return () => releaseDeferredGuard(root)
 }
