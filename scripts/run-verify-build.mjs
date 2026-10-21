@@ -136,6 +136,7 @@ const GATES = [
   'verify:preset-patch',
   'verify:session-mounts',
   'verify:handoff-stdin',
+  'verify:net-error-log',
 ]
 
 // The longest gates start first so none of them is left running alone at the

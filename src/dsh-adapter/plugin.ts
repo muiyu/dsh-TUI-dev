@@ -28,6 +28,7 @@ import { mountChannelUi } from './channel-ui.js'
 import { bindChannelCommands } from './channel/commands.js'
 import { registerTuiChannel } from '../adapter/channel/host-registry.js'
 import { createChildStderrReporter, installChildStderrGuard } from './childStderr.js'
+import { installNetErrorLog } from './net-error-log.js'
 import { removeClipboardImageDir } from '../utils/clipboard.js'
 import { appendCrashLog, serializeCrashDetail, unserializableCrashDetail, type CrashDetail } from '../utils/crashDetail.js'
 import { logForDebugging } from '../utils/debug.js'
@@ -297,6 +298,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
 
   // Validate settings before creating an agent or taking over the terminal.
   const tuiSettingsNs = resolveSettingsNamespace(configOwner, Config) as SettingsNamespace
+
+  // Experimental per-launch network-failure log (net-error-log.ts): clears
+  // net-error.log in the launch directory, then records every failed model
+  // request with the failure class the evidence supports — the harness's own
+  // coarse code is kept beside it, not replaced. File-only; renders nothing.
+  ctx.effect(() => installNetErrorLog(ctx), 'dsh-tui net-error.log')
 
   // Register before agent creation so its first checkpoint includes web list metadata.
   attachSessionListMetadata(ctx)

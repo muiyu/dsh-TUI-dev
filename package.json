@@ -165,6 +165,7 @@
     "verify:installer-bundle": "node scripts/verify-installer-bundle.mjs",
     "verify:prompt-debug": "npm run build && node scripts/verify-prompt-debug.mjs",
     "verify:clipboard-image": "node --import tsx/esm scripts/verify-clipboard-image.ts",
+    "verify:net-error-log": "node --import tsx/esm scripts/verify-net-error-log.ts",
     "verify:history-search": "node --import tsx/esm scripts/verify-history-search.mjs",
     "verify:initial-prompt": "node scripts/verify-initial-prompt.mjs && node scripts/verify-startup-argv.mjs",
     "verify:plugin-ledger": "node --import tsx/esm scripts/verify-plugin-ledger.ts",
