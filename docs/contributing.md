@@ -253,6 +253,29 @@ Cordis config
 `scripts/build.sh` 是面向本地 DeepSeek Harness 源码检出的备用构建器（定位 DSH
 检出并重连依赖），不是本独立仓库的默认构建命令。
 
+### Windows 安装包（离线 setup.exe）
+
+`scripts/windows/` 产出 Release 里的 `dsh-tui-setup-win-x64.exe`：离线载荷加 NSIS 界面，
+只能在 Windows x64 上构建（需要 Node 24 与 NSIS 3）。
+
+```powershell
+npm ci --prefix scripts/windows --ignore-scripts
+node scripts/windows/build-installer-payload.mjs --out dist-windows
+node scripts/verify-windows-installer.mjs --build dist-windows --makensis 'C:\Program Files (x86)\NSIS\makensis.exe'
+& 'C:\Program Files (x86)\NSIS\makensis.exe' "/DBUILD_DIR=$pwd\dist-windows" scripts/windows/installer.nsi
+node scripts/verify-windows-installer.mjs --exe dist-windows/dsh-tui-setup-win-x64.exe
+```
+
+- 载荷按 TUI 的版本契约解析已发布的最新 DSH RC；`--kernel-version <rc>` 固定内核，
+  `--locks <目录>` 配 `--node-version <版本>` 复用上次的解析结果，两者不能同时用。
+- `verify-windows-installer.mjs` 编译一份隔离目录的测试 EXE，跑安装、profile 组合、旧 RC
+  升级、重复安装、静默降级拒绝与卸载，不写真实用户目录，耗时写入 `smoke-result.json`。
+- 界面资源（ICO、页头、欢迎页动画帧）由 `node scripts/windows/make-brand-assets.mjs` 从
+  `docs/assets/readme/logo*.svg` 与 `scripts/windows/assets/icon.svg` 重新生成；产物已提交，
+  只有改图时才需要跑（需要 `sharp`）。
+- `release-bundle.yml` 的 `windows-installer` job 在 Release 时跑同一套命令，产物与便携包
+  一起以一份 `SHA256SUMS` 上传。
+
 ## 验证（Verification）
 
 仓库没有根级 `test` 或 `lint` 脚本；不要声称跑过它们。TypeScript 构建是通用
@@ -321,12 +344,14 @@ CI 回归都要跑。窄改动还要跑最近的聚焦脚本：
 | 改动区域 | 聚焦验证 |
 | --- | --- |
 | 通用无头屏幕组装 | `pnpm smoke` |
+| 底栏字段 / 状态接缝（`tuiStatus.setField`、StatusLine 三槽与 hover/click） | `node --import tsx/esm scripts/verify-status-fields.tsx` |
+| 底栏字段名单（`statusBar.pluginFieldsOrder` 语法/归一化/渲染、设置页三槽勾选与预填） | `node --import tsx/esm scripts/verify-plugin-field-order.ts`、`node --import tsx/esm scripts/verify-plugin-field-picker.tsx` |
 | 跨代理会话迁移（src/migrate、adapter 解析或事件合成） | `node --import tsx/esm scripts/verify-migrate.mjs` |
 | 共享投影器、DSH 翻译器 | `pnpm verify:projection-golden`、`node --import tsx/esm scripts/verify-dsh-translate.ts`、`pnpm verify:agent-domain` |
 | Claude 后端 | 对应的 `scripts/verify-claude-*`（假 SDK，不花钱）与 `node --import tsx/esm scripts/verify-backend-channel.ts`；`verify:claude-live`/`verify:claude-headless` 调用真实 CLI，只在有意花费时手动跑（钉在 haiku） |
 | 归档语义与后端 OAuth 登出 | `node --import tsx/esm scripts/verify-session-archive.tsx`（真实无头浏览器、假目录），`node --import tsx/esm scripts/verify-backend-logout.ts`（真实 channel/UI facade、假 OAuth host）；不触碰原生登录/真实凭据，DSH/Claude 默认删除语义保持 |
 | Codex 原生后端 | `pnpm verify:codex-contract`、对应 `scripts/verify-codex-*` 的假 app-server/fixture 回归、`node --import tsx/esm scripts/verify-backend-channel.ts`；中立层改动再跑 DSH 黄金投影、Claude 对照与 `verify-agent-event-invariants.ts`。真实 `verify-codex-live.ts` / 探针只经 `codex-cheap-only.mjs` 守卫，真实 ChatGPT 登录/TTY 未跑须单列 |
-| DSH Agent Teams（team-roster、team-tools、团队消息气泡、团队仪表盘、`/team` 开关与按 assembly 取舍的委派工具） | `node --import tsx/esm scripts/verify-agent-teams.ts`、`node --import tsx/esm scripts/verify-agent-teams-compat-0.2.0.ts`（0.2.0 日志兼容）、`node --import tsx/esm scripts/verify-team-message-bubble.tsx`、`node --import tsx/esm scripts/verify-team-dashboard.tsx`、`node --import tsx/esm scripts/verify-team-mode.ts`、`node scripts/verify-bundled-presets.mjs`（先构建） |
+| DSH Agent Teams（team-roster、team-tools、团队消息气泡、团队仪表盘、`/team status` 与可见性、按 assembly 取舍的委派工具） | `node --import tsx/esm scripts/verify-agent-teams.ts`、`node --import tsx/esm scripts/verify-agent-teams-compat-0.2.0.ts`（0.2.0 日志兼容）、`node --import tsx/esm scripts/verify-team-message-bubble.tsx`、`node --import tsx/esm scripts/verify-team-dashboard.tsx`、`node --import tsx/esm scripts/verify-team-mode.ts`、`node --import tsx/esm scripts/verify-team-command-visibility.ts`、`node scripts/verify-bundled-presets.mjs`（先构建） |
 | Channel submit/steer/pending 行为 | `node scripts/verify-submit.mjs` |
 | 回退后编辑重发与历史 Inbox 清理 | `pnpm verify:rewind-edit` |
 | 提示队列行为 | `node scripts/verify-queue.mjs` |
@@ -343,7 +368,7 @@ CI 回归都要跑。窄改动还要跑最近的聚焦脚本：
 | 鼠标指针事件管线（滚轮坐标/修饰位、点击/hover 派发、越界 clamp、指针态重置） | `node --import tsx/esm scripts/verify-pointer-events.ts` |
 | Hover 事件性能（兴趣边界完整、无兴趣矩形快路径、帧边界/多 root 失效） | `node --import tsx/esm scripts/verify-hover-coalesce.tsx` |
 | 输入框鼠标选区编辑（拖选/Shift+click/双击选词/删除替换/Esc 分层/Ctrl+C 复制、CJK 宽字符与 fold 侧钳制） | `node --import tsx/esm scripts/verify-input-selection.tsx` |
-| Sixel 编码、worker 缓存、缩略图/预览生命周期 | `node --import tsx/esm scripts/verify-terminal-images-sixel.tsx`、`node --import tsx/esm scripts/verify-sixel-transcript.tsx`；耗时对比 `node --import tsx/esm scripts/bench-sixel-encode.tsx` |
+| Sixel 编码、worker 缓存、缩略图/预览生命周期 | `node --import tsx/esm scripts/verify-terminal-images-sixel.tsx`、`node --import tsx/esm scripts/verify-sixel-transcript.tsx`, `node --import tsx/esm scripts/verify-sixel-cursor-heal.tsx`；耗时对比 `node --import tsx/esm scripts/bench-sixel-encode.tsx` |
 | Markdown 独立节点（表格、mermaid 图、公式块）、LaTeX 公式与流式分块间距 | `pnpm verify:table-layout`、`pnpm verify:mermaid-diagram`、`pnpm verify:latex-math`、`node --import tsx/esm scripts/verify-streaming-markdown-spacing.tsx` |
 | 跨进程会话占用账本（失败行为、严格读、锁回收、预约） | `pnpm verify:session-mounts` |
 | 未发送草稿的跨屏交接（快照、光标、图片绑定、归属） | `pnpm verify:composer-draft-handoff`；端到端换屏另见 `node scripts/verify-session-browser.mjs` |
@@ -514,13 +539,14 @@ TypeScript 源的脚本在头部声明 `node --import tsx/esm <script>` 形式�
 | 会话/channel 行为 | 后端中立的放 `src/dsh-adapter/channel/core/`，DSH 专属的放 `channel/extensions.ts` 及其 specialist、受影响的 UI 投影、编译产物、聚焦 channel/回放回归（含 `verify-backend-channel`、`verify-channel-rollback`） |
 | 渲染器/布局行为 | `src/ink/` 或 Yoga 源、编译产物、CI 回归、聚焦滚动/resize/PTY 探针 |
 | 技能发现或呈现 | DSH adapter、slash 命令合并、`/skills` 与相关回归；项目维护技能放 `.agents/skills/` 且不得加入 npm 包 |
+| CLI 自动化 | 根级 `cli/`、中英文 CLI 手册与 README、package/CI/standalone 验证；不从引擎依赖 `src/` |
 | 用户可见的文档化行为 | 中英文 README，适用的配置注释/帮助文本与 `docs/` 双语页；新增用户手册同时改 `scripts/guide-sources.mjs` 清单、`guide/dsh-tui-guide/SKILL.md` 路由，再 `node scripts/build-guide.mjs` / `node scripts/verify-guide.mjs`（不手改副本） |
 | 贡献入口或 PR 门禁 | `.mergify.yml`、`docs/contributing.md`、`docs/contributing.en.md`、`.github/workflows/pr-gate.yml`、`.github/scripts/pr-intake/`、`.github/APPROVED_CONTRIBUTORS` |
 | 包版本或依赖 | `package.json`、`pnpm-lock.yaml`、适用时的生成/发布产物；不要顺手搅动旧 npm 锁文件 |
 | 新增或改动后端 | 新建 `src/backends/<id>/`（`manifest.ts` + 实现），并提交 `pnpm compile` 重新生成的 `src/dsh-adapter/backends.generated.ts`（入库的生成产物，过期会被 `verify-backend-registry` 判红）：构建期索引由 `scripts/gen-backend-index.mjs` 生成，**不要**手改 `src/kernelPrefs.ts`、`src/dsh-adapter/backends.ts`（目录与身份断言都按 ID 取项，新增目录不必同步任何回归）；边界门禁的厂商包/`native.<id>` 规则由 manifest 派生，但派生结果与 `scripts/verify-adapter-boundary.ts` 的 `EXPECTED_*` 快照**逐字比对**——声明了非空 `vendorPackages` 或 `nativeKey` 的后端必须把该快照与 `ADAPTER.md` 一并更新（门禁报错会写明），只声明 `vendorPackages: []`、不声明 `nativeKey` 的后端无需改动；`install` 是声明式配方（`{ executor, specifier, version }`），宿主侧执行器表在 `src/dsh-adapter/install/`（首版只有 `pnpm-profile-add`）：注册表查表派生"这个条目可不可装"，装的是你声明的 specifier，声明了宿主不认识的执行器只等于"没有安装面"（不抛错）；没有包可装的后端（驱动系统 CLI 的那类）就不声明；名字走 manifest（插件用 `kind:'literal'`，绝不进 i18n 字典）；模块级/进程级资源池声明 `unloadExport`，会话级资源仍归 `session.dispose()`；`id`、`label` 与 `install` 的边界见 `ADAPTER.md` 的「后端 manifest」；新增后端要把聚焦回归登记进 `scripts/run-ci-group.mjs`，注册表门禁是 `scripts/verify-backend-registry.ts`；用户可见取值（`--backend`、配置行）同步双 README 与 `docs/configuration{,.en}.md` |
 | Claude Agent SDK 版本 | `package.json` 的 optional peer 与 dev 两处精确版本、`pnpm-lock.yaml`、`src/backends/claude/contract.ts`（`VALIDATED_SDK_VERSION`/`VALIDATED_CLI_VERSIONS`）、`docs/claude-backend{,.en}.md` 的安装命令；`verify:claude-contract` 检查一致 |
 | Codex 协议/验证版本 | 用 `scripts/codex-protocol-sync.mjs` 正规生成类型、更新 `src/backends/codex/contract.ts`、方法表/fixture/脱敏与 live/replay 回归、双语 Codex 用户说明；不添加 Codex SDK npm 依赖，不拿最低版本当全部实验接口已验证 |
-| 上游验证线 bump | `src/dsh-adapter/contract.ts`、`src/dsh-adapter/host-contract.ts`（`HOST_REPLICA_VERSION`，复核复刻面后 `scripts/verify-host-contract.ts --snapshot` 重写 `host-replica.snapshot.json`）、`src/dsh-adapter/oauth/`、`package.json` peer+dev 两组范围、`pnpm-workspace.yaml`、`.github/workflows/ci.yml` alpha-compat 的上游 SHA、`scripts/verify-{alpha-source,patch-surface,web-coexistence,upstream-contract}` 内的版本常量、`patch-surface.snapshot.json`、`ADAPTER.md`、`docs/user-guide.md`；步骤见 [ADAPTER.md](../ADAPTER.md) 升级流程 |
+| 上游验证线 bump | `src/dsh-adapter/contract.ts`、`src/dsh-adapter/host-contract.ts`（`HOST_REPLICA_VERSION`，复核复刻面后 `scripts/verify-host-contract.ts --snapshot` 重写 `host-replica.snapshot.json`）、`src/dsh-adapter/oauth/`、`package.json` peer+dev 两组范围、`pnpm-workspace.yaml`、`.github/workflows/ci.yml` alpha-compat 的上游 SHA、`scripts/verify-upstream-contract.ts` 的主线断言（`verify-{alpha-source,patch-surface,web-coexistence}` 从 `contract.ts` 读期望版本，CI 的兼容线源码检查用 `DSH_HARNESS_EXPECTED_VERSION` 指定版本，主线上游 tag 缺席时也用它临时覆盖主线 checkout）、`patch-surface.snapshot.json`、`ADAPTER.md`、`docs/user-guide.md`；步骤见 [ADAPTER.md](../ADAPTER.md) 升级流程 |
 
 ## Git 与发布安全（Git And Release Safety）
 

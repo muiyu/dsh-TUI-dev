@@ -434,6 +434,10 @@ export type Styles = {
    * doesn't pick up leading whitespace from middle rows.
    */
   readonly noSelect?: boolean | 'from-left-edge'
+  /** Stable copy ownership for a pane; metadata is one span per visible row. */
+  readonly selectionPane?: string
+  /** A pane wrapping scroll viewports keeps its geometry while contents move. */
+  readonly selectionPaneViewport?: boolean
 
   /**
    * This one-row box continues the line of the row above it: the break
@@ -481,12 +485,15 @@ export type TextDecoration = {
   /**
    * Prefix painted before every row (the code frame's rail and padding).
    * `width` is its display width; the wrap budget shrinks by it. The
-   * first `noSelect` columns are excluded from selection.
+   * first `noSelect` columns are excluded from selection. Soft-wrapped
+   * rows may exclude a different width via `continuationNoSelect`.
    */
   readonly prefix?: {
     readonly text: string
     readonly width: number
     readonly noSelect?: number
+    /** Defaults to noSelect; excludes injected padding on continuations. */
+    readonly continuationNoSelect?: number
   }
 
   /**

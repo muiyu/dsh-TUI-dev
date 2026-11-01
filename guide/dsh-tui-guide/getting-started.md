@@ -24,7 +24,10 @@ PowerShell：
 $env:DEEPSEEK_API_KEY = 'your-key'
 ```
 
-不要把真实密钥提交到仓库。正常的 profile 启动直接读取环境变量。
+不要把真实密钥提交到仓库。也可以什么都不设：**首次启动的引导第一步**可以直接
+`登录订阅账号（OAuth）`（含 DeepSeek 账号浏览器授权）或 `添加模型提供方（API key）`，
+写入 DSH 凭据库（`$DSH_HOME/.credentials.yaml`，默认 `~/.dsh/.credentials.yaml`），
+并把接入进来的模型选一个作为默认——环境变量只是「你也可以这样做」的那条路。
 
 ## 安装
 
@@ -121,6 +124,10 @@ dsh --profile dsh-tui
 命令从当前目录启动，因此 Agent 的默认工作区也是当前目录。进入目标项目目录后再
 启动即可。
 
+DSH 0.2.1 起，Agent 可以把会话切到别的目录（`working_directory` 工具或 Git
+worktree）。状态栏、Git 分支、`@` 补全和 `!` 命令会跟随这个目录，`/resume` 后
+也一样；会话仍登记在启动时的项目下。
+
 Windows 仓库检出还提供：
 
 ```bat
@@ -178,7 +185,7 @@ dsh 意外结束时，安全模式提供只读的环境诊断、profile 插件�
     重装对齐；
   - `dsh-tui doctor` 环境诊断。
 
-## 在 VS Code / Herdr 中运行
+## 在 VS Code / Herdr / 任意终端中运行
 
 - **VS Code**：可在集成终端直接运行，或用已上架 Marketplace 的 companion 扩展
   `dsh-tui-vscode`（真实终端会话、会话历史、指定会话恢复、IDE 选区通道）。
@@ -186,6 +193,11 @@ dsh 意外结束时，安全模式提供只读的环境诊断、profile 插件�
 - **Herdr**：直接在 [Herdr](https://herdr.dev) 窗格中运行 `dsh-tui`，无需额外
   配置；dsh-TUI 经 Herdr 本地集成 API 报告 `idle` / `working` / `blocked`
   （问卷与工具审批记为 `blocked`），在 Herdr 之外不做任何事。
+- **任意终端**：dsh-TUI 经 pty 用
+  [OSC 7501（Program Status Protocol）](https://www.superlogical.com/rex/docs/build/program-status)
+  报告 `idle` / `working` / `blocked` / `done` / `error`，实现了该协议的终端或
+  agent 收件箱可据此显示会话在做什么、何时需要你介入。未实现的终端会忽略该
+  序列，因此无需配置；设 `DSH_TUI_PROGRAM_STATUS=0` 可关闭报告。
 
 ## 更新到最新版本
 
@@ -305,6 +317,15 @@ pnpm dev:copy-config
 ```sh
 pnpm dev
 ```
+
+`pnpm dev` 默认保留完整 install/build/pack 检查。显式本地快速迭代可设置
+`DSH_TUI_DEV_FAST=1`，例如 `DSH_TUI_DEV_FAST=1 pnpm dev -- --no-launch`。
+缓存未命中时执行 frozen install、`compile`、不重复 `prepare` 的打包与隔离安装。
+只有源码/配置与编译加载器内容、Node/pnpm/npm/dsh 版本、编译与 vendor 产物、tarball 和已安装包/profile 均匹配时，
+才跳过这四步。若替换 pnpm/npm/dsh 而报告版本不变，须先运行一次普通（非 fast）开发流程。内部文档链接（如 `CLAUDE.md -> AGENTS.md`）参与指纹；树外、被排除、
+悬空或循环链接以及不可读输入会禁用复用并打印原因。工作开始前即作废旧成功标记，
+失败不写新标记。脚本输出阶段耗时与命中状态。发布前仍须正常执行 `pnpm build`
+和聚焦回归；快速模式不改变发布门禁。
 
 `pnpm dev:copy-config` 只复制 `~/.dsh/settings.yaml` 与
 `~/.dsh/.credentials.yaml`。Unix 上文件权限设为 `0600`；Windows 使用系统管理的

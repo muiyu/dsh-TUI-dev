@@ -1,6 +1,5 @@
 {
   "name": "dsh-tui-profile",
-  "version": "0.1.0-experimental",
   "private": true,
   "type": "module",
   "description": "In-tree TUI Profile of the dsh-TUI repository: dsh-TUI admission requirements, private tui.dsh/v1alpha1 protocol definitions, and conformance checks built on dsh-std.",

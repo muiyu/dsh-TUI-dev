@@ -304,6 +304,7 @@ export function createCoreChannel(
     generation: () => state.agentBindingGeneration,
     sessionId: () => state.agentId,
     localImages,
+    retainedStageIds: () => new Set(state.pending.filter(item => item.orphaned === true).flatMap(item => item.images.map(image => image.stageId))),
   })
   const files = createCoreFiles(ctx, {
     owner,
@@ -497,6 +498,7 @@ export function createCoreChannel(
       const ref = binding.session.ref
       return { backendId: ref.backendId, sessionId: ref.sessionId }
     },
+    get liveTurnEnds() { return feed.liveTurnEnds() },
     costReport: undefined,
     rateLimit: undefined,
     get olderHistory(): boolean {
@@ -783,6 +785,10 @@ export function createCoreChannel(
       selectionAttached: messageId => selectionAttachments.take(messageId),
     },
     resetTrajectory: () => { if (trajectoryOwned()) agentTrajectory.reset() },
+    // The image store follows the swap now, while the held rows that keep
+    // their images are still listed (#1651): delivering or editing one
+    // later must not be what notices the swap.
+    rebound: () => { composer.stagedImageGeneration() },
     retireAttachment: inputDelivery.retireAttachment,
     controls,
     hooks: () => extension.bind ?? {},
@@ -815,6 +821,7 @@ export function createCoreChannel(
     state.costReport = undefined
     state.lastUsage = undefined
     state.turnUsage = undefined
+    state.turnOutcome = undefined
     state.contextSegments = { system: 0, prompt: 0, assistant: 0, thinking: 0, tools: 0 }
     state.activeToolCount = 0
     state.responseChars = 0

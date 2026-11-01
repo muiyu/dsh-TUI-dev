@@ -269,11 +269,11 @@ jobs:
           submodules: recursive
           persist-credentials: false
 
-      # deepseek-ai/deepseek-harness tag dsh-v0.2.1-rc.2
+      # deepseek-ai/deepseek-harness tag dsh-v0.2.1-rc.5
       - uses: actions/checkout@v7
         with:
           repository: deepseek-ai/deepseek-harness
-          ref: 687f282e8625c6b8d11ff58211a90524be2e4317
+          ref: b830ec950faba0a46dda564be3e2d854afed94f1
           path: .upstream/deepseek-harness
           fetch-depth: 1
           persist-credentials: false
@@ -722,6 +722,9 @@ jobs:
       # dsh 替身，本就不依赖 lib/ 产物。放进这里的理由是 required 的
       # input-terminal 组只在 ubuntu 跑，而 bin/dsh-tui.js 有 Windows 专属
       # 分支（旧二进制清理、shellQuote/cmd 拼串）——只靠 ubuntu 等于没测。
+      - name: Independent CLI contract (cross-platform)
+        run: pnpm verify:cli
+
       - name: Safe-mode launcher gate (cross-platform)
         run: node scripts/verify-safe-mode.mjs
 

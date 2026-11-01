@@ -172,6 +172,10 @@ check('DEFAULT_STATUS_BAR keeps the intended compact defaults', () => {
     activity: false,
     trajectory: false,
     shortcutHint: false,
+    // Plugin footer fields (tuiStatus.setField): on by default, and the list
+    // starts at `*` so an upgrade changes nothing.
+    pluginFields: true,
+    pluginFieldsOrder: '*',
   })
 })
 

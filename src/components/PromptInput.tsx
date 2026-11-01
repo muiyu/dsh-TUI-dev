@@ -24,6 +24,7 @@ import { stringWidth } from '../ink/stringWidth.js'
 import { truncateToWidth } from '../ink/truncateToWidth.js'
 import { getGraphemeSegmenter } from '../utils/intl.js'
 import { draftWordRangeAt, isDraftWordBoundary } from '../utils/draftWordBoundary.js'
+import { wordBoundaryLeft, wordBoundaryRight } from '../utils/inputWordBoundary.js'
 import { formatClipboardInsert, readClipboard } from '../utils/clipboard.js'
 import { imagePathMediaType, parsePastedImagePath, readBoundedRegularFile, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
 import { editInExternalEditor } from '../utils/externalEditor.js'
@@ -35,7 +36,7 @@ import type {
   StagedImageHandle,
 } from '../dsh-adapter/channel.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
-import { isBootSafeCommand, isHiddenCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
+import { isBootSafeCommand, isHiddenCommandName, isLocalCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
 import { appendHistory, HISTORY_LIMIT, historyProjectKey, loadHistoryOldestFirst } from '../history.js'
 import { mentionAtCaret } from '../utils/mentions.js'
 import { preserveSelection, type FileCandidate } from '../utils/fileSuggestions.js'
@@ -248,23 +249,6 @@ export function composerImageRefsForText(
   return refs
 }
 
-/** Index of the word boundary at or before `cursor` (readline alt+b). */
-function wordBoundaryLeft(text: string, cursor: number): number {
-  let index = cursor
-  while (index > 0 && /\s/.test(text[index - 1]!)) index--
-  while (index > 0 && !/\s/.test(text[index - 1]!)) index--
-  return index
-}
-
-/** Index of the word boundary after `cursor` (readline alt+f). */
-function wordBoundaryRight(text: string, cursor: number): number {
-  const length = text.length
-  let index = cursor
-  while (index < length && !/\s/.test(text[index]!)) index++
-  while (index < length && /\s/.test(text[index]!)) index++
-  return index
-}
-
 // --- vim normal-mode helpers -----------------------------------------------
 // `/vim` 编辑模式的 normal 键位几何：行/词移动与删除目标。空白分词
 // （不区分 vim 的 word/WORD），对输入框场景足够且行为直观。
@@ -453,7 +437,7 @@ export interface PromptController {
    * branch calls this first, before its clear/exit semantics.
    */
   consumeSelectionCopy(): boolean
-  /** Consume selection/editor Esc before Chat's working-turn interrupt. */
+  /** Consume a local overlay/editor Esc before Chat's working-turn interrupt. */
   consumeEscape(): boolean
   /** Toggle vim editing mode (`/vim`); returns the new state (true = on). */
   toggleVim(): boolean
@@ -502,6 +486,14 @@ export interface PromptInputProps {
    * empty first value.
    */
   draftCache?: PromptDraftCache
+  /**
+   * The input can take keys: draft adoption has run and the listener above is
+   * live. Fires on mount when already unsuspended, and again whenever
+   * `suspended` lifts — a caller replaying keys captured during a screen swap
+   * must hold its queue until then, because a replay emitted while suspended
+   * is dropped by `isActive: !suspended` with nothing left to retry it.
+   */
+  onInputReady?: () => void
   /** Whether the `?` help menu is open (state lives in the Chat screen). */
   helpOpen: boolean
   onToggleHelp(): void
@@ -570,9 +562,9 @@ export interface PromptInputProps {
   onCaretImage?(image: TranscriptImage | undefined, title: string | undefined, reason: 'caret' | 'click'): void
   /**
    * True while the caller shows the caret-driven preview. Esc then goes to
-   * `onDismissCaretPreview` ahead of every other Esc meaning (the ladder's
-   * "close the image preview" rung): this input's listener runs before
-   * Chat's, and the prompt is NOT inert under a caret preview.
+   * `onDismissCaretPreview` after help and before ordinary editing (the
+   * "close the image preview" rung). Chat can delegate through the prompt
+   * controller; the prompt remains active under a caret preview.
    */
   caretPreviewOpen?: boolean
   onDismissCaretPreview?(): void
@@ -620,6 +612,7 @@ export function PromptInput({
   suspended = false,
   cursorParking = true,
   draftCache,
+  onInputReady,
   helpOpen,
   onToggleHelp,
   onRunCommand,
@@ -1055,7 +1048,10 @@ export function PromptInput({
   // hand-off below. A commit-time write would run BEFORE the restore effect
   // has consumed the slot, so the composer's own first (empty) value would
   // erase the draft it just came back for.
-  // Publish the live controller (fresh closure over `value` every render).
+  // Publish the live controller. `hasText()` reads the ref, not the render
+  // closure: a draft restored in a passive effect (the launchpad hand-off
+  // replays its keys from there) is already in `valueRef` while this facade
+  // still carries the empty first value.
   // A prompt-slot panel withdraws the handle in the same commit: external
   // injection must not append/submit a hidden command draft while it waits
   // for a decision. clear() mirrors the double-tap-Esc clear.
@@ -1066,7 +1062,7 @@ export function PromptInput({
       return
     }
     controllerRef.current = {
-      hasText: () => value.length > 0,
+      hasText: () => valueRef.current.length > 0,
       text: () => valueRef.current,
       previewImages: () => composerImageRefsForText(valueRef.current, draftImagesRef.current).flatMap(ref => {
         const image = channel.stagedImage(ref.stageId)
@@ -1117,7 +1113,7 @@ export function PromptInput({
         // The selection stays: copy never clears it (Esc/typing/delete do).
         return true
       },
-      consumeEscape: consumeEditingEscape,
+      consumeEscape: consumeLocalEscape,
       toggleVim: () => {
         const next = !vimEnabledRef.current
         vimEnabledRef.current = next
@@ -1143,7 +1139,15 @@ export function PromptInput({
   // tell the caller to clear it.
   const lastFill = React.useRef<string | null>(null)
   React.useLayoutEffect(() => {
-    if (fillText && fillText !== lastFill.current) {
+    // The caller clears a fill once it lands (`fillText` returns to null).
+    // Drop the dedupe key with it: keeping the key past the clear made the
+    // next recall of the SAME text look like a duplicate re-render and
+    // silently swallowed it (#1665).
+    if (!fillText) {
+      lastFill.current = null
+      return
+    }
+    if (fillText !== lastFill.current) {
       lastFill.current = fillText
       syncImageGeneration()
       discardDraftImages()
@@ -1163,6 +1167,15 @@ export function PromptInput({
   const editorBusyRef = React.useRef(false)
   /** Enter dedupe window: cmd pipelines can deliver one Enter as `\r`+`\n`. */
   const lastEnterAtRef = React.useRef(0)
+  /**
+   * Ctrl+Enter already carried the non-docked queue through its interrupt and
+   * re-queued it: those previews are the parked copies now, so a second
+   * Ctrl+Enter during the same convergence must not list them again.
+   */
+  const interruptRequeuedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!channel.cancelPending) interruptRequeuedRef.current = false
+  }, [channel.cancelPending])
   React.useEffect(() => {
     return () => {
       if (escTimerRef.current) clearTimeout(escTimerRef.current)
@@ -1305,16 +1318,17 @@ export function PromptInput({
   }, [channel, mention?.query, atTrigger])
   // Esc dismisses the overlay for the token being edited (it reopens once the
   // text changes); it must NOT clear a mid-message input.
-  const fileEscRef = React.useRef(-1)
-  React.useEffect(() => {
-    fileEscRef.current = -1
-  }, [value])
+  const fileEscRef = React.useRef<{ edit: number; start: number } | null>(null)
+  const [, refreshFileMenu] = React.useState(0)
+  const fileMenuDismissed = (start: number): boolean =>
+    fileEscRef.current?.edit === inputEditSequenceRef.current && fileEscRef.current.start === start
   const fileOverlayOpen =
+    mention !== undefined &&
     fileMatches.length > 0 &&
     !expanded &&
     !helpOpen &&
     !selectionActive &&
-    fileEscRef.current !== mention?.start
+    !fileMenuDismissed(mention.start)
 
   /**
    * The `[Image #N]` tokens of `text` that carry a live draft capability.
@@ -1698,14 +1712,37 @@ export function PromptInput({
     setFileSelected(0)
   }
 
+  /**
+   * A channel action that throws synchronously (owner/lifetime race while the
+   * process is tearing down or a registration changed) is swallowed by Ink's
+   * stdin pump — stderr only, no UI. Reporting it here is the difference
+   * between "the send failed" and "my text vanished". The draft is never
+   * cleared before the call succeeds, so the text stays editable either way.
+   */
+  const reportSendFailure = (error: unknown): void => {
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      channel.notify(t('send-failed', { err: message }), { color: 'error' })
+    } catch {
+      // A channel whose owner is already gone cannot show a toast either.
+      // The draft surviving is the important half; the renderer's stdin
+      // catch only writes the throw to stderr.
+    }
+  }
+
   const submitText = (text: string, notice?: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     const images = imageRefsFor(trimmed)
     if (shellImagesUnsupported(trimmed, images)) return
     rememberHistory(trimmed, images)
+    try {
+      channel.submit(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.submit(trimmed, images)
     if (notice) {
       channel.notify(notice, { timeoutMs: 2500 })
     } else if (channel.working) {
@@ -1725,8 +1762,20 @@ export function PromptInput({
     if (!trimmed) return
     const images = imageRefsFor(trimmed)
     rememberHistory(trimmed, images)
+    try {
+      channel.steer(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.steer(trimmed, images)
+    // While an abort is still converging the step boundary this steer waits
+    // for may be the very thing the wedged turn never reaches: do not promise
+    // an immediate next step then.
+    if (channel.cancelPending) {
+      channel.notify(t('input-steer-pending'), { color: 'warning', timeoutMs: 4000 })
+      return
+    }
     channel.notify(t('input-interrupted-next'), { timeoutMs: 2500 })
   }
 
@@ -1740,8 +1789,13 @@ export function PromptInput({
     const images = imageRefsFor(trimmed)
     if (shellImagesUnsupported(trimmed, images)) return
     rememberHistory(trimmed, images)
+    try {
+      channel.submit(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.submit(trimmed, images)
     channel.notify(t('input-queued-after-turn'), { timeoutMs: 2500 })
   }
 
@@ -1804,7 +1858,14 @@ export function PromptInput({
   /** Send the whole dock now (⏎ on an empty draft, or the hint row click):
    *  FIFO, exactly once, through the channel's own delivery chain. */
   const sendDocked = (): void => {
-    const sent = channel.deliverDocked()
+    let sent: number
+    try {
+      sent = channel.deliverDocked()
+    } catch (error) {
+      // The dock rows are still parked: no "sent" claim may be made here.
+      reportSendFailure(error)
+      return
+    }
     if (sent > 0) channel.notify(t('input-dock-sent', { n: sent }), { timeoutMs: 2500 })
     setDockSelected(null)
   }
@@ -1891,15 +1952,44 @@ export function PromptInput({
     // immediately once the abort settles. Docked rows are NOT listed here:
     // the channel's interruptAndDeliver takes the dock itself first (same
     // FIFO order), so including them would send each docked text twice.
+    const interruptWasPending = channel.cancelPending
     const images = imageRefsFor(trimmed)
+    // A cancel already in flight did NOT carry the queue: either it is a plain
+    // Esc/Ctrl+C cancel (the backend kept the rows, and the interrupt below
+    // drops them, so re-listing them here is what re-delivers them) or a
+    // previous Ctrl+Enter already re-queued them (re-listing would duplicate
+    // every one). `interruptRequeuedRef` tells the two apart across the
+    // convergence window.
+    const includePending = !interruptWasPending || !interruptRequeuedRef.current
     const queued: ComposerSubmission[] = [
-      ...channel.pending.filter(item => item.docked !== true).map(item => ({ text: item.text, images: item.images ?? [] })),
+      ...(includePending
+        ? channel.pending.filter(item => item.docked !== true).map(item => ({ text: item.text, images: item.images ?? [] }))
+        : []),
       { text: value, images },
     ]
-    const count = channel.interruptAndDeliver(queued)
+    const count = (() => {
+      try {
+        return channel.interruptAndDeliver(queued)
+      } catch (error) {
+        reportSendFailure(error)
+        return 0
+      }
+    })()
     if (count === 0) return
+    // This request owns the queue's re-delivery from here on — including the
+    // fresh draft, whose preview enters `pending` as a followup. A later
+    // Ctrl+Enter during the same convergence must not list that preview again
+    // (a repeated interrupt does not drop the earlier copies).
+    if (includePending) interruptRequeuedRef.current = true
     rememberHistory(trimmed, images)
     clearDeliveredDraft()
+    // A cancel already in flight means the text was re-queued behind an abort
+    // that has not converged; the "immediate" claim would be false until it
+    // does (the wedged-turn case). The channel keeps the messages queued.
+    if (interruptWasPending) {
+      channel.notify(t('input-interrupt-deferred'), { color: 'warning', timeoutMs: 4000 })
+      return
+    }
     channel.notify(t('input-interrupt-immediate'), { timeoutMs: 2500 })
   }
 
@@ -1939,7 +2029,10 @@ export function PromptInput({
       })
       return true
     }
-    const known = command !== undefined || isHiddenCommandName(parsed.name)
+    // A local command may be intentionally absent from the published catalog
+    // (the service-gated `/team`): a typed name is still this app's command,
+    // never text for the model. Backend-unavailable locals were refused above.
+    const known = command !== undefined || isHiddenCommandName(parsed.name) || isLocalCommandName(parsed.name)
     if (!known) return false
     const generation = syncImageGeneration()
     const revision = draftRevisionRef.current
@@ -2111,19 +2204,55 @@ export function PromptInput({
 
   /** Local Esc layers, shared by the prompt listener and Chat's delegation.
    * Refs preserve this order even when expansion and Esc share a stdin batch. */
-  const consumeEditingEscape = (): boolean => {
-    // The docked-queue selector folds first: Esc leaves the selector and the
-    // dock itself stays put (⏎/↑ keep working afterwards).
+  const consumeLocalEscape = (): boolean => {
+    if (helpOpen) {
+      onToggleHelp()
+      return true
+    }
+    if (caretPreviewOpen) {
+      onDismissCaretPreview?.()
+      return true
+    }
+    // Read the live draft: typing `/`, Esc and more text can arrive in the
+    // same stdin batch before React has rendered the command menu (#1310).
+    const current = valueRef.current
+    if (!expandedRef.current && !selectionActive) {
+      if (current.startsWith('/') && !current.includes('\n') && channel.commandCompletions(current).length > 0) {
+        clearDraftUndoably()
+        return true
+      }
+      const currentMention = mentionAtCaret(current, cursorRef.current)
+      if (currentMention !== undefined && fileMatches.length > 0 && !fileMenuDismissed(currentMention.start)) {
+        // An edit sequence makes the dismissal token-local and resets it
+        // on the next text edit, including one in the same stdin batch.
+        fileEscRef.current = { edit: inputEditSequenceRef.current, start: currentMention.start }
+        refreshFileMenu(tick => tick + 1)
+        return true
+      }
+    }
+    // Esc leaves the docked-queue selector; the dock itself stays put
+    // (⏎/↑ keep working afterwards).
     if (dockSelectedRef.current !== null) {
       setDockSelected(null)
       return true
     }
-    if (selectionRef.current && !helpOpen && !overlayOpen && !fileOverlayOpen) {
+    if (selectionRef.current) {
       clearSelection()
       return true
     }
     if (expandedRef.current) {
       collapseEditor()
+      return true
+    }
+    if (foldBlockRef.current !== null) {
+      updateFoldBlock(null)
+      return true
+    }
+    // Send-to-Chat chips peel before the draft; that same Esc must not
+    // interrupt a running turn. Vim keeps its existing mode-key ownership.
+    const stagedContexts = channel.attachedContexts ?? []
+    if (!vimEnabledRef.current && stagedContexts.length > 0) {
+      for (const staged of [...stagedContexts]) channel.detachContext(staged.id)
       return true
     }
     return false
@@ -2293,24 +2422,13 @@ export function PromptInput({
     const cursor = cursorRef.current
     const selection = selectionRef.current
 
-    // ── caret-driven image preview ──────────────────────────────────────
-    // Esc dismisses the preview the caret opened, before any other Esc
-    // meaning (help stays above it: the help menu is modal over the prompt).
-    if (key.escape && caretPreviewOpen && !helpOpen) {
-      event?.stopImmediatePropagation()
-      onDismissCaretPreview?.()
-      return
-    }
-
-    // ── mouse selection (drag / Shift+click / double-click) ─────────────
-    // Layered ahead of the fold-block rules: with an active selection, Esc
-    // ONLY drops the highlight (text untouched), and Backspace/Delete
-    // delete the selected span. Arrows/typing handle the selection at their
-    // own arms below.
-    if (key.escape && consumeEditingEscape()) {
+    // Share the local Esc ladder with Chat's earlier global listener.
+    if (key.escape && consumeLocalEscape()) {
       event.stopImmediatePropagation()
       return
     }
+    // Mouse selection (drag / Shift+click / double-click): Backspace/Delete
+    // remove the span; arrows/typing handle it at their own arms below.
     if ((key.backspace || key.delete) && selection) {
       // Removing a selection is atomic: it must undo in one step, not fold
       // into whatever the caret-continuity rule would otherwise see.
@@ -2334,10 +2452,6 @@ export function PromptInput({
     const clampRowEnd = (pos: number) =>
       block && cursor <= block.start ? Math.min(pos, block.start) : pos
     if (block) {
-      if (key.escape) {
-        updateFoldBlock(null)
-        return
-      }
       if ((key.backspace && cursor === block.end) || (key.delete && cursor === block.start)) {
         const next = value.slice(0, block.start) + value.slice(block.end)
         updateFoldBlock(null)
@@ -2990,7 +3104,7 @@ export function PromptInput({
       }
       return
     }
-    if (isMod(key) && key.leftArrow) {
+    if ((isMod(key) || key.meta) && key.leftArrow) {
       // Jump to the previous word boundary (readline alt+b). Must precede the
       // bare-arrow arms: Ctrl+Left arrives as leftArrow + ctrl. An active
       // selection collapses to its START edge first (editor semantics).
@@ -2998,7 +3112,7 @@ export function PromptInput({
       setInput(value, sel ? sel.start : wordBoundaryLeft(value, cursor))
       return
     }
-    if (isMod(key) && key.rightArrow) {
+    if ((isMod(key) || key.meta) && key.rightArrow) {
       // Jump to the next word boundary (readline alt+f).
       const sel = selectionRef.current
       setInput(value, sel ? sel.end : wordBoundaryRight(value, cursor))
@@ -3025,7 +3139,7 @@ export function PromptInput({
       setInput(value, sel ? sel.end : nextGraphemeBoundary(bounds, cursor))
       return
     }
-    if (key.backspace) {
+    if (key.backspace && !key.meta) {
       if (cursor === 0) return
       const start = previousGraphemeBoundary(bounds, cursor)
       deleteInputRange(start, cursor)
@@ -3080,17 +3194,12 @@ export function PromptInput({
       undoDraft()
       return
     }
-    if (isMod(key) && input === 'w') {
+    if ((isMod(key) && input === 'w') || (key.meta && key.backspace)) {
       // Delete the word before the cursor: readline's whitespace-delimited
       // rule (skip trailing whitespace, then the word). The ICU/CJK
       // alternative is a separate editor-UX change, not part of draft undo.
       // The deletion start never crosses into the block.
-      const before = value.slice(0, cursor)
-      let end = before.length
-      while (end > 0 && /\s/.test(before[end - 1]!)) end--
-      let start = end
-      while (start > 0 && !/\s/.test(before[start - 1]!)) start--
-      deleteInputRange(clampRowStart(start), cursor)
+      deleteInputRange(clampRowStart(wordBoundaryLeft(value, cursor)), cursor)
       return
     }
     // ── vim mode (`/vim`) ──────────────────────────────────────────────
@@ -3356,28 +3465,6 @@ export function PromptInput({
     }
 
     if (key.escape) {
-      if (helpOpen) {
-        onToggleHelp()
-        return
-      }
-      // A single Esc closes the open command menu first;
-      // the double-tap-clear semantics only apply to ordinary input.
-      if (overlayOpen) {
-        clearDraftUndoably()
-        return
-      }
-      // File overlay: Esc dismisses the menu for THIS token only — clearing
-      // the input would nuke a mid-message `@` mention's surrounding text.
-      if (fileOverlayOpen) {
-        fileEscRef.current = mention?.start ?? -1
-        return
-      }
-      // The docked-queue selector folds before anything else: Esc leaves the
-      // selector (Chat's delegation reaches this through consumeEscape too).
-      if (dockSelectedRef.current !== null) {
-        setDockSelected(null)
-        return
-      }
       // With pending messages while working, Esc = interrupt and DOCK the
       // queue (Claude Code parity): the previews park channel-side and the
       // dock hint offers ↑ to edit one / ⏎ to send them all — nothing
@@ -3385,17 +3472,6 @@ export function PromptInput({
       // turn still needs its plain abort.
       if (channel.working && channel.pending.length > 0) {
         if (channel.interruptAndDock() === 0) channel.cancel()
-        return
-      }
-      // "Send to Chat" chips peel before the draft: the first Esc drops the
-      // contexts panels staged and leaves the typed text untouched, so a second
-      // Esc then clears the input as usual. The press is CONSUMED — this rung
-      // has exactly one meaning, and a running turn must not be interrupted by
-      // the same key that only dropped a chip.
-      const stagedContexts = channel.attachedContexts ?? []
-      if (stagedContexts.length > 0) {
-        event?.stopImmediatePropagation()
-        for (const staged of [...stagedContexts]) channel.detachContext(staged.id)
         return
       }
       // A single Esc clears the current input (if any); the double-tap
@@ -3456,6 +3532,17 @@ export function PromptInput({
       setFileSelected(0)
     }
   }, { isActive: !suspended })
+  // Readiness follows the listener's own gate. Announcing on mount regardless
+  // lets the owner drain a replay queue into a handler that drops every key
+  // while suspended (plugin dialog, approval, …), and a `[]` effect never
+  // re-fires once the panel closes. The callback goes through a ref so an
+  // inline closure from the parent cannot re-trigger the replay per render.
+  const onInputReadyRef = React.useRef(onInputReady)
+  React.useLayoutEffect(() => { onInputReadyRef.current = onInputReady })
+  React.useEffect(() => {
+    if (suspended) return
+    onInputReadyRef.current?.()
+  }, [suspended])
 
   // === Render: hard-wrap every logical line at the input width, then show
   // the window of visual lines with the caret row always visible.
@@ -4339,7 +4426,7 @@ export function PromptInput({
             )}
             {dockCount > 0 && (
               <Box flexDirection="column">
-                <Text dimColor>⏸ {t('input-pending-dock-label')}</Text>
+                <Text dimColor>⏸ {t(dockedPending.every(item => item.orphaned === true) ? 'input-pending-orphan-label' : 'input-pending-dock-label')}</Text>
                 {dockedPending.slice(dockStart, dockEnd).map((item, index) => {
                   // The window maps to absolute dock indices: the click and
                   // the highlight name the same row the user sees.
@@ -4360,11 +4447,11 @@ export function PromptInput({
                   // 点击提示行 = 全部发送（与空输入 ⏎ 同路径）
                   onClick={() => { sendDocked() }}
                 >
-                  <Text dimColor>{' '}{t('input-pending-dock-hint')}</Text>
+                  <Text dimColor>{' '}{t(channel.status === 'disposed' ? 'input-pending-dock-hint-disposed' : channel.working ? 'input-pending-dock-hint-working' : 'input-pending-dock-hint')}</Text>
                 </Box>
               </Box>
             )}
-            <Text dimColor>Alt+↑ {t('input-pending-actions-hint')}</Text>
+            <Text dimColor>Alt+↑ {t(channel.status === 'disposed' ? 'input-pending-actions-hint-disposed' : 'input-pending-actions-hint')}</Text>
           </Box>
         )}
         {fileOverlayOpen && (

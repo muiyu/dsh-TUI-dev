@@ -190,7 +190,7 @@ export function createInitialChannelView(
 ): Pick<ChannelState,
   'effortLevels' | 'version' | 'ready' | 'startupFailure' | 'rows' | 'status' | 'sessionTitle' | 'sessionColor' |
   'agentId' | 'sessionId' | 'agentBindingGeneration' | 'model' | 'modelDisplay' | 'provider' | 'tokens' | 'cwd' |
-  'displayCwd' | 'gitBranch' | 'working' | 'compaction' | 'cancelPending' | 'spinnerMode' |
+  'displayCwd' | 'workingDirectory' | 'gitBranch' | 'working' | 'compaction' | 'cancelPending' | 'spinnerMode' |
   'responseChars' | 'activeToolCount' | 'turnStart' | 'lastUserText' |
   'notifications' | 'contextWindow' | 'reasoningEffort' | 'mode' | 'modeIndex' |
   'activityFrames' | 'configuredProvider' | 'configuredModel' |
@@ -200,13 +200,13 @@ export function createInitialChannelView(
   'statusBar' | 'whale' | 'whaleIdle' | 'splashFont' | 'brand' | 'minimalUi' | 'activityEnabled' | 'contextBarEnabled' |
   'statusBar' | 'whale' | 'whaleIdle' | 'whaleGirl' | 'minimalUi' | 'activityEnabled' | 'contextBarEnabled' |
   'agentPreset' | 'goal' | 'todos' | 'loadedContext' | 'pending' | 'commandList' |
-  'lastUsage' | 'turnUsage' | 'tps' | 'tpsSamples' | 'contextSegments' | 'mainCost' | 'subagentCost' | 'subagents' | 'backgroundJobs' | 'selection'
+  'lastUsage' | 'turnUsage' | 'turnOutcome' | 'tps' | 'tpsSamples' | 'contextSegments' | 'mainCost' | 'subagentCost' | 'subagents' | 'backgroundJobs' | 'selection'
 > {
   return {
     effortLevels: undefined, version: 0, ready: options.startup === undefined, startupFailure: undefined, rows: [], selection: undefined, status: 'starting', sessionTitle: '', sessionColor: '',
     agentId: input.agentId, sessionId: input.sessionId, agentBindingGeneration: 0, model: options.model, modelDisplay: undefined, provider: options.provider,
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, peak: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, idle: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } },
-    cwd: options.cwd, displayCwd: input.cwdDescription, gitBranch: undefined, working: false,
+    cwd: options.cwd, displayCwd: input.cwdDescription, workingDirectory: undefined, gitBranch: undefined, working: false,
     compaction: undefined,
     cancelPending: false, spinnerMode: 'requesting', responseChars: 0, activeToolCount: 0,
     turnStart: 0, lastUserText: '', notifications: [], contextWindow: undefined,
@@ -223,7 +223,7 @@ export function createInitialChannelView(
     smoothStreaming: options.smoothStreaming !== false, statusBar: normalizeStatusBar(options.statusBar),
     whale: options.whale !== false, whaleIdle: options.whaleIdle !== false, whaleGirl: options.whaleGirl === true, splashFont: normalizeSplashFont(options.splashFont), brand: normalizeBrandSetting(options.brand), minimalUi: options.minimalUi === true, activityEnabled: options.activity !== false,
     contextBarEnabled: options.contextBar !== false, agentPreset: options.agentPreset, goal: undefined,
-    todos: [], loadedContext: undefined, pending: [], commandList: [], lastUsage: undefined, turnUsage: undefined,
+    todos: [], loadedContext: undefined, pending: [], commandList: [], lastUsage: undefined, turnUsage: undefined, turnOutcome: undefined,
     tps: undefined, tpsSamples: [], contextSegments: { system: 0, prompt: 0, assistant: 0, thinking: 0, tools: 0 },
     // 费用估算输入：主会话按模型分桶 + 子代理快照。与 tokens 并行累计，
     // tokens 的既有语义/显示不变（DESIGN D2）。

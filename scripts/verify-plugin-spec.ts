@@ -4,7 +4,7 @@
  *
  *   1. verifyRegistry / verifyContractProfiles 全绿（schemaHash 钉死 +
  *      十点完备 + 坐标/权限 parity + securityBoundary:false）；
- *   2. 27 个 validate fixture 逐一过 schema check + 语义校验，pass/fail 与
+ *   2. 28 个 validate fixture 逐一过 schema check + 语义校验，pass/fail 与
  *      run.js 期望逐条相等；
  *   3. 8 个 negotiate 场景与 run.js 期望逐字段 deepEqual；
  *   4. Backend 家族（TUI-BACKEND-001）逐条镜像 run.js 的 Backend 段的期望：两种后端形态的声明
@@ -27,7 +27,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const { check } = await import('../src/adapter/standard/schema-check.js')
-const { loadSpecData, verifyRegistry, verifyContractProfiles } = await import('../src/adapter/standard/registry.js')
+const { loadSpecData, verifyRegistry, verifyContractProfiles, registryEntries } = await import('../src/adapter/standard/registry.js')
 const { createContractIndex, validatePlugin, validateHost } = await import('../src/adapter/standard/validate.js')
 const { negotiate } = await import('../src/adapter/standard/negotiate.js')
 const { NEGOTIATION_ERROR_CODES } = await import('../src/adapter/standard/types.js')
@@ -68,6 +68,13 @@ expect('verifyRegistry clean', verifyRegistry(data).length === 0, verifyRegistry
 expect('verifyContractProfiles clean', verifyContractProfiles(data).length === 0, verifyContractProfiles(data).join(' | '))
 expect('admission error code table has 7 entries', NEGOTIATION_ERROR_CODES.length === 7)
 
+// D-4 gap 1: the in-repo profile carries no version of its own (governance §3) — it ships
+// inside this package and its identity is the digest pins, not semver. A `version` here
+// would be a claim with no consumer and no sync gate of its own, so putting one back is a
+// deliberate act: delete this check in the same change.
+const profilePackage = JSON.parse(readFileSync(join(specDir, 'package.json'), 'utf8')) as Record<string, unknown>
+expect('the in-repo profile claims no version of its own', !Object.hasOwn(profilePackage, 'version'))
+
 // --- 2. validate fixture 矩阵（官方 parser/validator + TUI semantic layer）
 interface ValidateCase {
   name: string
@@ -100,6 +107,8 @@ const CASES: ValidateCase[] = [
   { name: 'valid plugin', value: fixture('valid-plugin.json'), kind: 'plugin', pass: true },
   { name: 'valid plugin coordinate subscriptions', value: fixture('valid-plugin-object-subs.json'), kind: 'plugin', pass: true },
   { name: 'valid private protocol plugin', value: fixture('valid-private-protocol-plugin.json'), kind: 'plugin', pass: true },
+  // D-4 gap 6: a manifest may require a manifest extension coordinate (`tui.dsh/v1alpha1#Backend`).
+  { name: 'valid extension coordinate plugin', value: fixture('valid-extension-coordinate-plugin.json'), kind: 'plugin', pass: true },
   { name: 'invalid service rejected', value: fixture('invalid-plugin-unknown-service.json'), kind: 'plugin', pass: false },
   { name: 'duplicate command rejected', value: fixture('invalid-plugin-duplicate-command.json'), kind: 'plugin', pass: false },
   { name: 'unknown coordinate rejected', value: fixture('invalid-plugin-unknown-coordinate.json'), kind: 'plugin', pass: false },
@@ -129,6 +138,25 @@ const CASES: ValidateCase[] = [
   { name: 'compound unknown+rejected manifest is valid', value: fixture('plugin-compound-unknown.json'), kind: 'plugin', pass: true },
 ]
 for (const validateEntry of CASES) validateCase(validateEntry)
+
+// --- 2b. 参考实现的索引与宿主同源（D-4 gap 6） ------------------------------
+// run.js 不在任何自动化里，所以「两边索引同一批坐标」这条在这里钉住：参考实现把索引
+// 抽成一个不依赖 @dsh-std 的模块（tui-profile/conformance/tests/profile-index.js），
+// 这里直接与 `registryEntries()` 逐坐标比对。宿主自 W-2 起读 imports + definitions +
+// extensions，参考实现曾漏掉 extensions，于是同一个清单（requires 里引用
+// `tui.dsh/v1alpha1#Backend`）在两边结论相反。
+const referenceIndex = await import('../tui-profile/conformance/tests/profile-index.js') as {
+  profileEntriesOf: (profile: unknown) => Array<{ coordinates: { apiVersion: string; kind: string } }>
+}
+const coordinateOf = (entry: { coordinates: { apiVersion: string; kind: string } }) =>
+  `${entry.coordinates.apiVersion}#${entry.coordinates.kind}`
+const referenceCoordinates = new Set(referenceIndex.profileEntriesOf(data.registry).map(coordinateOf))
+const hostCoordinates = new Set(registryEntries(data.registry).map(coordinateOf))
+const missingInReference = [...hostCoordinates].filter(key => !referenceCoordinates.has(key))
+const extraInReference = [...referenceCoordinates].filter(key => !hostCoordinates.has(key))
+expect('the reference index reads the same coordinates as the host',
+  missingInReference.length === 0 && extraInReference.length === 0,
+  `missing in reference: ${missingInReference.join(', ') || 'none'}; extra in reference: ${extraInReference.join(', ') || 'none'}`)
 
 // --- 3. negotiate 八场景（期望与 run.js 断言逐字段 deepEqual） -------------
 const hostTui = load('registry/host-descriptor.tui.example.json')

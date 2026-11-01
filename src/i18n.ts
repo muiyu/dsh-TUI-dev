@@ -151,6 +151,8 @@ const dict = {
   'export-model': { zh: '- 模型: {{model}}', en: '- Model: {{model}}' },
   'export-session': { zh: '- 会话: {{id}}', en: '- Session: {{id}}' },
   'export-dir': { zh: '- 目录: {{cwd}}', en: '- Directory: {{cwd}}' },
+  'mentions-image-adjusted': { zh: '@{{path}} 已适配：{{detail}}', en: '@{{path}} adapted: {{detail}}' },
+  'mentions-image-failed': { zh: '@{{path}} 无法附加：{{reason}}', en: '@{{path}} could not be attached: {{reason}}' },
   'mentions-attached': { zh: '已附加 {{count}} 个文件引用', en: { one: 'Attached {{count}} file reference', other: 'Attached {{count}} file references' } },
   'mentions-missing': { zh: '未找到引用: {{paths}}', en: 'References not found: {{paths}}' },
   // Agent Teams: the tag after the sender of a peer message bubble.
@@ -189,6 +191,10 @@ const dict = {
   'input-images-staged': { zh: '已附加 {{count}} 张图片', en: { one: 'Attached {{count}} image', other: 'Attached {{count}} images' } },
   'input-images-staged-adapted': { zh: '已附加 {{count}} 张图片 · {{adapted}} 张已适配', en: { one: 'Attached {{count}} image · {{adapted}} adapted', other: 'Attached {{count}} images · {{adapted}} adapted' } },
   'send-failed': { zh: '发送失败 · {{err}}', en: 'Send failed · {{err}}' },
+  'input-not-accepted': { zh: '后端没有接受这条消息，请重试或检查会话状态', en: 'The backend did not accept this message; retry or check the session state' },
+  'input-refused-held': { zh: '{{reason}}。消息已暂存：按 ↑ 编辑', en: '{{reason}}. The message is held: ↑ to edit' },
+  'session-reattached': { zh: '会话服务已恢复，已重新打开这个会话', en: 'The session services are back; this session was reopened' },
+  'input-session-disposed': { zh: '这个会话已经结束，/new 开新会话或 /restart 恢复该会话', en: 'This session has ended; /new starts a new one, /restart resumes it' },
   // ── agent team: 用户发给子代理的消息，由父代理转发（模型可见） ──────
   'agent-message-native-envelope': { zh: '请通过 {{tool}} 将下面的消息发送给子代理 {{name}}（id: {{id}}）。不要代替子代理回复。\n\n{{text}}', en: 'Use {{tool}} to send the following message to subagent {{name}} (id: {{id}}). Do not answer on behalf of the subagent.\n\n{{text}}' },
   'agent-message-envelope': {
@@ -229,6 +235,8 @@ const dict = {
   'status-rate-limit': { zh: '订阅用量 {{usage}}', en: 'Subscription usage {{usage}}' },
   'interrupt-failed': { zh: '打断请求失败：排队消息没有撤回，仍会在下一回合发送；已取消暂存，避免重复发送', en: 'The interrupt request failed: the queued messages were not withdrawn and will still run next turn; they are no longer held, so nothing is sent twice' },
   'interrupt-unconfirmed': { zh: '无法确认排队消息已撤回：它们仍会在下一回合发送，不再暂存', en: 'Could not confirm the queued messages were withdrawn: they will still run next turn and are no longer held' },
+  'interrupt-pending': { zh: '中断请求已发出，正在等待回合停止……', en: 'Interrupt requested; waiting for the turn to stop…' },
+  'interrupt-stuck': { zh: '中断迟迟没有生效（工具可能没有响应中断）。可用 /restart：它会中断当前回合并尝试重启；若进程无法正常收尾，退出后会打印恢复本会话的命令，并注明排队输入保存在哪里。', en: 'The interrupt is not taking effect (a tool may be ignoring it). Use /restart: it interrupts this turn and tries to restart; if the process cannot shut down cleanly it exits and prints the command that resumes this session and where the queued input is kept.' },
   'cmd-unavailable-backend': { zh: '/{{cmd}} 在 {{backend}} 内核下不可用', en: '/{{cmd}} is not available on the {{backend}} kernel' },
   'export-user-section': { zh: '## 用户', en: '## User' },
   'export-thinking-section': { zh: '## 思考', en: '## Thinking' },
@@ -364,8 +372,17 @@ const dict = {
   'resume-session-occupied': { zh: '该会话正被其他 TUI 终端占用（进程 {{pid}}），无法进入', en: 'Another TUI terminal holds this session (pid {{pid}}); cannot enter' },
   'resume-mount-busy': { zh: '无法确认该会话是否被其他终端占用（占用检查正忙），请稍后重试', en: 'Could not confirm whether another terminal holds this session (the occupancy check is busy); retry in a moment' },
   'resume-mount-unavailable': { zh: '无法验证该会话的占用状态 · {{detail}}', en: 'Could not verify this session\'s occupancy · {{detail}}' },
+  // 损坏账本的出口：只在拒绝句自称 `damaged` 时追加，所以它必须读起来像"针对那个文件"的
+  // 建议，而不是通用下一步。
+  //
+  // 长度由屏幕决定，不由作者决定：通知上限三行，而 120 列终端上实际换行宽度只有 80 列，
+  // 再长就会被裁。因此动作（删除 / remove）与前提（其他 / no other）必须挺过裁切，只有
+  // 末尾"会自动重建"这句安心话可以让位；`.lock` 同理不再在这里点名 —— 屏幕上放不下，
+  // 点名它的是 CLI 的 `--resume` 拒绝句。
+  'resume-mount-ledger-repair': { zh: '该文件已损坏：无其他 dsh-tui 运行时删除它，会自动重建', en: 'Damaged: remove it with no other TUI running (it rebuilds)' },
   'session-mount-occupied-short': { zh: '占用 pid {{pid}}', en: 'held by pid {{pid}}' },
   'resume-failed': { zh: '恢复失败 · {{err}}', en: 'Resume failed · {{err}}' },
+  'resume-owned-elsewhere': { zh: '另一个 DSH 进程正在写入此会话。请先在该进程（如 dsh web）释放会话，再重试恢复；不要删除会话或锁文件。', en: 'Another DSH process is writing this session. Release it in that process (for example, dsh web), then retry resume. Do not delete the session or lock files.' },
   'resume-attach-failed': { zh: '已恢复会话，但工作区挂载失败 · {{err}}', en: 'Session resumed, but workspace attachment failed · {{err}}' },
   'resume-session-changed': { zh: '会话已切换，恢复已放弃', en: 'The session changed; the resume was dropped' },
   'new-session-while-working': { zh: '回合运行中，无法新建会话', en: 'Cannot start a new session while a turn is running' },
@@ -452,6 +469,7 @@ const dict = {
   'questionnaire-answered': { zh: '📋 问卷已答 · {{total}} 题', en: '📋 Questionnaire answered · {{total}} questions' },
 
   // ── utils/loaded-context.ts ─────────────────────────────────────────
+  'command-output-truncated': { zh: '…（命令输出已截断：最多 200 行、65536 个 UTF-16 码元、每行 4000 显示单元）', en: '… (command output truncated: 200 lines, 65536 UTF-16 code units, 4000 cells per line)' },
   'context-truncated': { zh: '…（已截断）', en: '… (truncated)' },
   'context-sections': { zh: '系统提示词 {{n}} 段', en: 'System prompt {{n}} sections' },
   'context-files': { zh: '工作区指令 ×{{n}}', en: 'Workspace instructions ×{{n}}' },
@@ -512,6 +530,9 @@ const dict = {
   'status-model': { zh: '模型   {{model}}', en: 'Model   {{model}}' },
   'status-working': { zh: '工作中', en: 'working' },
   'status-idle': { zh: '空闲', en: 'idle' },
+  'program-status-approval': { zh: '等待授权：{{tool}}', en: 'Approval needed: {{tool}}' },
+  'program-status-question': { zh: '等待回答：{{question}}', en: 'Waiting for your answer: {{question}}' },
+  'program-status-dialog': { zh: '等待输入：{{title}}', en: 'Waiting for input: {{title}}' },
   'status-state': { zh: '状态   {{state}}', en: 'Status   {{state}}' },
   'status-session': { zh: '会话   {{id}}', en: 'Session   {{id}}' },
   'status-dir': { zh: '目录   {{cwd}}', en: 'Directory   {{cwd}}' },
@@ -550,7 +571,6 @@ const dict = {
   'home-workspace-missing': { zh: '目录不存在', en: 'directory missing' },
   'home-no-workspaces': { zh: '还没有工作区 · 在任意目录启动 dsh-tui 即可自动加入', en: 'No workspaces yet · start dsh-tui in a directory to add it' },
   'home-sessions-title': { zh: '{{name}} 的会话', en: 'Sessions in {{name}}' },
-  'home-sessions-count': { zh: '{{n}} 个会话', en: { one: '{{n}} session', other: '{{n}} sessions' } },
   'home-no-sessions': { zh: '这个工作区还没有会话 · Enter 新建一个', en: 'No sessions in this workspace yet · Enter starts one' },
   'home-sessions-loading': { zh: '正在读取会话…', en: 'Loading sessions…' },
   'home-sessions-refreshing': { zh: '后台刷新中', en: 'refreshing' },
@@ -758,6 +778,7 @@ const dict = {
   'reload-kind-activity': { zh: '活动指示', en: 'activity' },
   // ── /restart (process restart with session resume) ────────────────────
   'restart-starting': { zh: '正在重启 dsh-tui，完成后自动恢复当前会话……', en: 'Restarting dsh-tui. The session resumes when it comes back…' },
+  'restart-during-turn': { zh: '当前回合仍在运行，正在中断重启；排队输入会在重启后暂存（仅保留文字，图片不保留），不会自动发送。若进程无法正常收尾，退出后会打印恢复本会话的命令，并注明排队输入保存在哪里。', en: 'The current turn is still running; interrupting and restarting. Queued input is held after the restart (text only, images are not kept), not sent automatically. If the process cannot shut down cleanly it exits and prints the command that resumes this session and where the queued input is kept.' },
   'restart-unavailable': { zh: '当前运行方式不支持进程内重启（未挂载重启通道）。', en: 'Restart is unavailable in this launch mode (no restart channel mounted).' },
   'streaming-folded': { zh: '…（前 {{count}} 字符流式期间已折叠，落定后完整显示）', en: '…(first {{count}} chars folded while streaming; full text renders once the turn settles)' },
   'mermaid-too-wide': { zh: '（图需要 {{width}} 列，当前宽度不足，显示源码）', en: '(diagram needs {{width}} columns; showing the source)' },
@@ -794,6 +815,7 @@ const dict = {
   'btw-fullscreen-title': { zh: '侧问线程', en: 'Side thread' },
   'btw-scene-hints': { zh: 'Enter 追问 · ↑/↓ 选择 · n 新话题 · s 送聊天 · c 复制 · Esc 返回', en: 'Enter ask · ↑/↓ select · n new · s to chat · c copy · Esc back' },
   'btw-panel-unavailable': { zh: 'btw 面板未启用（/settings → dsh-tui.sidePanel.panels）', en: 'btw panel not enabled (/settings → dsh-tui.sidePanel.panels)' },
+  'btw-surface-busy': { zh: '侧问已发出，但当前界面挡住了它（关掉浮层后再 /btw）', en: 'Side question is hidden by the current screen — close it, then rerun /btw' },
   'btw-output-unavailable': { zh: '没有收到回答', en: 'No answer received' },
   'btw-answering': { zh: '思考中…', en: 'Answering…' },
   'btw-hint-loading': { zh: 'Esc 取消', en: 'Esc cancel' },
@@ -1000,11 +1022,13 @@ const dict = {
   'input-sent-after-turn': { zh: '已发送，当前回合结束后处理', en: 'Sent, processed after the current turn' },
   'input-injected': { zh: '已从编辑器发送', en: 'Sent from editor' },
   'input-interrupted-next': { zh: '已插话 · 下一步立即处理', en: 'Interrupted · processed next' },
+  'input-steer-pending': { zh: '已插话；中断尚未生效，等待回合恢复后再处理', en: 'Steered; the interrupt has not taken effect — held until the turn can advance' },
   'input-queued-after-turn': { zh: '已排队 · 回合结束后处理', en: 'Queued · processed after the turn' },
   'input-cannot-retract': { zh: '无法撤回：消息可能已被处理，或当前版本不支持', en: 'Cannot retract: the message may already be processed, or this version doesn\'t support it' },
   'input-retracted': { zh: '已撤回，可编辑后重新发送', en: 'Retracted, editable and resendable' },
   'input-empty': { zh: '输入为空，没有可发送的内容', en: 'Empty input, nothing to send' },
   'input-interrupt-immediate': { zh: '已打断当前回合，正在立即处理', en: 'Interrupted current turn, processing immediately' },
+  'input-interrupt-deferred': { zh: '中断尚未生效：消息已排队，回合结束后处理；若持续卡住，可用 /restart', en: 'The interrupt has not taken effect yet: messages are queued until the turn ends. If it stays stuck, use /restart' },
   'input-clipboard-empty': { zh: '剪贴板为空', en: 'Clipboard is empty' },
   'input-editor-unavailable': { zh: '错误：未配置编辑器。请设置 $VISUAL 或 $EDITOR 环境变量。', en: 'Error: No editor configured. Set $VISUAL or $EDITOR environment variable.' },
   'input-editor-failed': { zh: '外部编辑器失败：{{name}}', en: 'External editor failed: {{name}}' },
@@ -1022,10 +1046,18 @@ const dict = {
   'input-pending-steer-label': { zh: '插话 · 下一步送达', en: 'Steer · delivered next' },
   'input-pending-queue-label': { zh: '排队 · 回合结束后送达', en: 'Queued · delivered after the turn' },
   'input-pending-actions-hint': { zh: '撤回 · Esc 打断并暂存排队消息', en: 'Retract · Esc interrupts and holds the queue' },
+  'input-pending-actions-hint-disposed': { zh: '撤回', en: 'Retract' },
   'input-pending-dock-label': { zh: '已暂存 · 打断后保留，不会自动发送', en: 'Held · kept after the interrupt, not sent automatically' },
+  'input-pending-orphan-label': { zh: '已暂存 · 未送达，不会自动发送', en: 'Held · not delivered, not sent automatically' },
   'input-pending-dock-hint': { zh: '按 ↑ 编辑排队消息，⏎ 立即发送', en: 'Press ↑ to edit queued messages, ⏎ to send now' },
+  'input-pending-dock-hint-disposed': { zh: '会话已结束：/new 或 /restart 后，⏎ 发送暂存消息，↑ 编辑', en: 'Session ended: after /new or /restart, ⏎ sends the held messages and ↑ edits them' },
+  'input-pending-dock-hint-working': { zh: '按 ↑ 编辑排队消息，回合结束后 ⏎ 发送', en: 'Press ↑ to edit queued messages, ⏎ sends after the turn' },
   'input-dock-sent': { zh: '已发送 {{n}} 条暂存消息', en: 'Sent {{n}} held message(s)' },
   'input-dock-swapped': { zh: '已交换：草稿暂存，所点消息回到输入框（Ctrl+Z 换回）', en: 'Swapped: the draft is held and the picked message is back in the input (Ctrl+Z swaps back)' },
+  // No ⏎ here: whether ⏎ sends now or only after /new depends on the session,
+  // and the dock hint below says which (#1651).
+  'input-orphans-held': { zh: '{{count}} 条排队消息没有送达，已暂存：按 ↑ 编辑', en: { one: '{{count}} queued message was not delivered and is held: ↑ to edit', other: '{{count}} queued messages were not delivered and are held: ↑ to edit' } },
+  'input-dock-session-disposed': { zh: '会话已结束，暂存消息仍保留；/new 开新会话或 /restart 恢复该会话后按 ⏎ 发送', en: 'This session has ended; held messages are kept. After /new or /restart, ⏎ sends them' },
   'input-dock-confirming': { zh: '{{n}} 条暂存消息还在等打断完成，稍后再发送或编辑', en: '{{n}} held message(s) are waiting for the interrupt to finish; send or edit again in a moment' },
   // U+30FB (not U+00B7): the separator participates in the folded-chip
   // width arithmetic; U+00B7 is EA-ambiguous and paints 2 cells on CJK
@@ -1085,6 +1117,7 @@ const dict = {
   'tool-live-omitted': { zh: '… 已省略 {{count}} 行', en: { one: '… {{count}} line omitted', other: '… {{count}} lines omitted' } },
   // 搜索结果截断行（search 卡 paths 形态）：
   'search-results-total': { zh: '…（共 {{n}} 条）', en: '… ({{n}} total)' },
+  'worktree-result-base': { zh: '基于 {{from}}（{{commit}}）', en: 'from {{from}} ({{commit}})' },
   // 按行折叠的溢出提示：卡片正文行预算（capLines）、终端卡多行命令折叠
   // （foldTerminalCommand）、分屏 diff 隐藏行（SplitDiffView）。按字符折叠
   // 的行内标记见 long-line-folded。
@@ -1096,6 +1129,9 @@ const dict = {
   'tool-card-source-truncated': { zh: '原始数据已折叠：以上是预览，全文保留在会话日志里', en: 'Source folded: the above is a preview; the session log keeps the full text' },
   'tool-card-full-unavailable': { zh: '以上是整理后的视图，没有保留可展开的原始全文', en: 'Formatted view above; no raw full text was kept to expand' },
   'tool-card-window-shown': { zh: '… 只显示前 {{shown}}/{{total}} 行（全文仍保留）', en: '… showing the first {{shown}}/{{total}} lines (the full text is kept)' },
+  // 双栏展开态的窗口按「换行后的屏幕行」计（一条源行可能占多行），与上面按源行计
+  // 的 unified 卡不是同一个单位，故单独一条文案，避免「N/M 行」被读成源行数。
+  'tool-card-window-shown-wrapped': { zh: '… 只显示前 {{shown}}/{{total}} 个换行后的行', en: '… showing the first {{shown}}/{{total}} wrapped rows' },
   // 单回合用量行（/tokens、/cost、底栏 hover）。缓存段只在后端上报了缓存
   // token 时显示，未上报不当作 0。
   'usage-turn-summary': { zh: '本轮', en: 'turn' },
@@ -1116,8 +1152,6 @@ const dict = {
   'sugg-more-below': { zh: '↓{{n}}', en: '↓{{n}}' },
   // 二级补全子项描述（/lang /theme /effort /preset /activity 的 children）
   'sugg-status-desc': { zh: '显示当前选择', en: 'Show the current choice' },
-  'sugg-team-on-desc': { zh: '开启 Agent Teams（启用团队 bundle）', en: 'Switch Agent Teams on (enable the team bundle)' },
-  'sugg-team-off-desc': { zh: '关闭 Agent Teams（停用团队 bundle）', en: 'Switch Agent Teams off (disable the team bundle)' },
   'sugg-lang-zh-desc': { zh: '切换界面语言到中文', en: 'Switch the UI language to Chinese' },
   'sugg-lang-en-desc': { zh: '切换界面语言到英文', en: 'Switch the UI language to English' },
   'sugg-theme-auto-desc': { zh: '跟随终端背景自动切换', en: 'Follow the terminal background' },
@@ -1153,11 +1187,12 @@ const dict = {
   'help-clear-input': { zh: 'esc 清空输入', en: 'esc to clear input' },
   'help-history-nav': { zh: '↑/↓ 历史', en: '↑/↓ for history' },
   'help-move-cursor': { zh: '←/→ 移动光标', en: '←/→ to move cursor' },
-  'help-word-jumps': { zh: '{{mod}}←/→ 按词跳转', en: '{{mod}}←/→ for word jumps' },
+  'help-word-jumps': { zh: '{{mod}}←/→ 或 Alt/Option+←/→ 按词跳转', en: '{{mod}}←/→ or Alt/Option+←/→ for word jumps' },
   'help-complete-command': { zh: 'tab 补全命令', en: 'tab to complete command' },
   'help-cycle-mode': { zh: 'shift+tab 切换模式', en: 'shift+tab to cycle mode' },
   'help-open-editor': { zh: '{{key}} 打开编辑器', en: '{{key}} to open editor' },
-  'help-fold-todos': { zh: '{{key}} 折叠待办', en: '{{key}} to fold todos' },
+  'help-fold-todos': { zh: '{{key}} 运行时折叠／空闲时隐藏待办', en: '{{key}} to fold running / hide idle todos' },
+  'goal-todo-hide-hint': { zh: '{{key}} 隐藏／恢复', en: '{{key}} to hide/restore' },
   'goal-todo-fold-hint': { zh: '{{key}} 折叠', en: '{{key}} to fold' },
   // ── goal budget and the backend-neutral /goal (src/channel/goal-command.ts)
   'goal-budget-used': { zh: '已用 {{used}} / {{budget}} tokens · {{time}}', en: 'Used {{used}} / {{budget}} tokens · {{time}}' },
@@ -1234,10 +1269,20 @@ const dict = {
   'settings-web-key-changed': { zh: '网页搜索设置已变化，请重新打开设置后输入密钥', en: 'Web search settings changed. Reopen settings and enter the key again.' },
   // /settings 里 sidePanel.panels 的勾选列表。
   'settings-panels-unclaimed': { zh: '暂无面板使用此 id：先保留，等插件注册后生效', en: 'No panel uses this id yet; kept until a plugin registers it' },
+  'settings-panels-temporary': { zh: '临时面板 #{{n}} · 仅本次运行，不保存', en: 'Temporary panel #{{n}} · this run only, not saved' },
+  'settings-panels-legacy-anonymous': { zh: '旧匿名地址无法识别，请移除并重新选择面板', en: 'Old anonymous address: remove it and select the panel again' },
   'settings-panels-plugin': { zh: '插件面板（{{plugin}}）', en: 'Plugin panel ({{plugin}})' },
   'settings-panels-advanced': { zh: '高级：编辑原始面板列表', en: 'Advanced: edit raw panel list' },
+  'settings-fields-advanced': { zh: '高级：编辑原始字段列表', en: 'Advanced: edit raw field list' },
+  'settings-fields-unclaimed': { zh: '未认领：先保留，等插件注册后生效', en: 'Unclaimed; kept until a plugin registers it' },
+  'settings-fields-moved': { zh: '改自 {{slot}}', en: 'moved from {{slot}}' },
+  'settings-fields-slot-left-tail': { zh: '左组末尾', en: 'Left group tail' },
+  'settings-fields-slot-right-head': { zh: '右组开头', en: 'Right group head' },
+  'settings-fields-slot-right-tail': { zh: '右组末尾', en: 'Right group tail' },
   'settings-panels-min-one': { zh: '至少保留一个启用的面板', en: 'Keep at least one panel enabled' },
+  'settings-page-general': { zh: '常规', en: 'General' },
   'settings-hint-list': { zh: '**Enter** 进入/编辑/切换（改动即保存） · Esc 退出', en: '**Enter** open/edit/toggle (auto-saves) · Esc exit' },
+  'settings-hint-list-pages': { zh: '**Enter** 进入/编辑/切换（改动即保存） · **Tab** 切换页 · Esc 退出', en: '**Enter** open/edit/toggle (auto-saves) · **Tab** switch page · Esc exit' },
   'settings-hint-group': { zh: '**Enter** 编辑/切换（改动即保存） · Esc 返回', en: '**Enter** edit/toggle (auto-saves) · Esc back' },
   'settings-hint-edit': { zh: '**Enter** 确认并保存 · Esc 取消', en: '**Enter** to confirm & save · Esc to cancel' },
 
@@ -1275,6 +1320,7 @@ const dict = {
   'hint-rewind-back': { zh: '**Enter** 回退 · Esc 返回', en: '**Enter** to rewind · Esc to back' },
   'statusline-hint-select': { zh: 'esc 返回输入', en: 'esc to return to input' },
   'statusline-hint-working': { zh: 'esc 中断', en: 'esc to interrupt' },
+  'statusline-hint-interrupting': { zh: '中断中…', en: 'interrupting…' },
   'statusline-hint-shortcuts': { zh: '? 查看快捷键', en: '? for shortcuts' },
   // ── 底栏字段 hover 明细（补充行读出；技术标签 ctx/free/read 等保持不译）──
   'status-detail-session-id': { zh: '会话日志目录与此 id 同名', en: 'the session log directory is named after this id' },
@@ -1350,6 +1396,7 @@ const dict = {
   'ext-decision-pending': { zh: '正在等待插件决定（{{event}}）…', en: 'Waiting for a plugin decision ({{event}})…' },
   'ext-stale-dropped': { zh: '等待插件期间会话已切换，该条输入已丢弃', en: 'Session switched while a plugin decided — the input was dropped' },
   'ext-shortcut-failed': { zh: '插件快捷键 {{combo}} 执行失败', en: 'Plugin shortcut {{combo}} failed' },
+  'ext-status-field-failed': { zh: '插件底栏字段 {{key}} 操作失败', en: 'Plugin footer field {{key}} failed' },
   'command-invoke-denied': { zh: '命令调用已被授权文件拒绝（commands.invoke 已撤销）', en: 'Command invocation denied by the grants file (commands.invoke revoked)' },
   'command-invoke-denied-owner': {
     zh: '命令 "/{{name}}" 的调用已被拒绝——注册它的插件 "{{owner}}" 已被撤销 commands.invoke',
@@ -1406,9 +1453,35 @@ const dict = {
     zh: '本 profile 没有额外插件：只有安装自带与 dsh-tui 自身。装好后用 /plugin list 复查。',
     en: 'No extra plugins in this profile: only the installation-supplied bundles and dsh-tui itself. Run /plugin list again after installing one.',
   },
-  'plugins-list-hint': {
-    zh: '详情：/plugin info <名字>；卸载：/plugin remove <名字>；启用 / 关闭：/plugin enable|disable <名字|行 id>；安装源：/plugin registries；完整诊断：无参 /plugin。',
-    en: 'Details: /plugin info <name>; remove: /plugin remove <name>; enable or disable: /plugin enable|disable <name|row id>; registries: /plugin registries; full diagnostics: bare /plugin.',
+  'plugins-experimental-header': {
+    zh: 'DSH 自带实验性功能（EXP，{{count}} 项）：',
+    en: 'Experimental features shipped by DSH (EXP, {{count}}):',
+  },
+  'plugins-experimental-enable': {
+    zh: '启用：/plugin enable {{bundle}}',
+    en: 'Enable: /plugin enable {{bundle}}',
+  },
+  'plugins-experimental-disable': {
+    zh: '关闭：/plugin disable {{bundle}}',
+    en: 'Disable: /plugin disable {{bundle}}',
+  },
+  // 「用途」一行只回答「开完多出什么」，命令只留躲不掉的那一个：机制（索引在内存、
+  // 极简模式如何取舍）与迁移细节都属于 README，这一屏是目录而不是说明书。
+  'plugins-experimental-team-hint': {
+    zh: '用途：Agent 分工合作，/team status 看状态',
+    en: 'Use: agents divide the work; /team status shows the roster',
+  },
+  'plugins-experimental-auto-review-hint': {
+    zh: '用途：/permission auto，模型自主审批',
+    en: 'Use: /permission auto — the model approves on its own',
+  },
+  'plugins-experimental-session-search-hint': {
+    zh: '用途：Agent 能翻本工作区的历史会话',
+    en: 'Use: agents can browse past sessions in this workspace',
+  },
+  'plugins-experimental-worktree-hint': {
+    zh: '用途：Agent 新开 Git 分支与工作树，转到里面干活',
+    en: 'Use: agents start a new Git branch and worktree and move into it',
   },
   'plugins-bundles-header': { zh: '已装 bundle（数据来自 profile 插件服务）：', en: 'Installed bundles (from the profile plugin service):' },
   'plugins-bundles-official': { zh: '安装自带', en: 'Official (installation-supplied)' },
@@ -1451,6 +1524,10 @@ const dict = {
   'plugins-install-busy': {
     zh: '回合正在运行，先结束它（或 /new）再装插件：安装会改动 profile 并触发应用／热重载',
     en: 'A turn is running; finish it (or /new) before installing: an install changes the profile and applies or hot-reloads plugins',
+  },
+  'plugins-install-grant-busy': {
+    zh: '回合正在运行，先结束它（或 /new）再授予：授权会在下一次决策立即生效',
+    en: 'A turn is running; finish it (or /new) before granting: the grant takes effect on the next decision',
   },
   'plugins-install-inspect': { zh: '将要安装：{{spec}}（{{kind}} · {{bundle}}）', en: 'About to install: {{spec}} ({{kind}} · {{bundle}})' },
   'plugins-install-trusted': {
@@ -1524,10 +1601,60 @@ const dict = {
     zh: '提醒：注册表里的包在装上之前无法判定是否声明了 TUI 贡献；若未声明，它不会作为后端/贡献出现，并会在 /plugin 列表里带常驻标签。',
     en: 'Heads up: a registry package’s declaration cannot be read before it lands; if it declares none, it will not appear as a backend/contribution and /plugin will tag it.',
   },
+  // ── 授权写入（grant-file.ts / 装链路 / 启停链路共用）──
+  'plugins-grant-reason-corrupt': { zh: '授权文件无法解析', en: 'the grants file cannot be parsed' },
+  'plugins-grant-reason-unreadable': { zh: '授权文件无法读取', en: 'the grants file cannot be read' },
+  'plugins-grant-reason-write-failed': { zh: '授权文件写入失败', en: 'the grants file could not be written' },
+  'plugins-grant-write-refused': {
+    zh: '授权未写入（{{reason}}）：{{file}} —— 安装/启用继续进行，授权可在 /plugin 的授权矩阵里手工补齐。',
+    en: 'No grant was written ({{reason}}): {{file}} — the install/enable goes on; add the rule by hand from the /plugin grant matrix.',
+  },
+  'plugins-grant-unknown-skipped': { zh: '跳过宿主不认识的权限：{{names}}', en: 'Skipped permissions this host does not know: {{names}}' },
+  'plugins-install-granted': { zh: '已按声明授予 {{count}} 项权限（{{id}}）', en: 'Granted {{count}} declared permission(s) ({{id}})' },
+  'plugins-install-granted-silent': {
+    zh: '已按包内声明自动授予 {{count}} 项权限（{{id}}）',
+    en: 'Granted {{count}} declared permission(s) automatically ({{id}})',
+  },
+  'plugins-grant-unapplied': {
+    zh: '以下授权已写入但未生效（scope 不被接受或被 deny 覆盖）：{{scopes}}',
+    en: 'These rules were written but do not take effect (unsupported scope, or outranked by a deny): {{scopes}}',
+  },
+  'plugins-grant-rolled-back': { zh: '已回滚本次写入的授权', en: 'The grant written for this run was rolled back' },
+  'plugins-grant-rollback-failed': {
+    zh: '授权已写入但未能回滚：文件已被改动，请到 /plugin 的授权矩阵核对。',
+    en: 'The grant was written but could not be rolled back: the file changed meanwhile; check the /plugin grant matrix.',
+  },
+  'plugins-install-grant-ask': {
+    zh: '该组件（{{id}}）已装上。下面这些权限写在包内声明里：现在授予吗？（授权是行为约束，不是安全隔离）',
+    en: 'The component ({{id}}) is installed. These are the permissions it declares: grant them now? (Grants are behavioural constraints, not a security boundary.)',
+  },
+  'plugins-grant-list-title': {
+    zh: '要授予的权限（按包内声明，逐字使用其 scope）',
+    en: 'Permissions to grant (as declared, with the declared scope verbatim)',
+  },
+  'plugins-grant-list-title-revoke': {
+    zh: '将撤销的权限（按包内声明，按权限名撤销）',
+    en: 'Permissions to revoke (declared names; every scope of each)',
+  },
+  'plugins-grant-default-allow': { zh: '默认允许', en: 'default allow' },
+  'plugins-grant-default-deny': { zh: '默认拒绝', en: 'default deny' },
+  'plugins-grant-granted': { zh: '✓已授权', en: '✓granted' },
+  'plugins-grant-not-granted': { zh: '·未授权', en: '·not granted' },
+  'plugins-grant-more': { zh: '还有 {{count}} 项…', en: 'and {{count}} more…' },
+  'plugins-grant-hidden': {
+    zh: '共 {{count}} 项权限（此处未逐行显示）',
+    en: '{{count}} permission(s) not listed here',
+  },
+  'plugins-grant-unknown-line': {
+    zh: '宿主不认识、将跳过：{{names}}（共 {{count}} 项）',
+    en: 'Unknown to this host and skipped: {{names}} ({{count}} total)',
+  },
+  'plugins-install-key-grant': { zh: '⏎ 授予 {{count}} 项 · esc 跳过（安装保留）', en: '⏎ grant {{count}} · esc skip (install stays)' },
   'plugins-install-builds-title': { zh: '以下构建脚本需要批准（写进 profile 的 allowBuilds）：', en: 'These build scripts need approval (written to the profile allowBuilds):' },
   'plugins-install-incompatible-title': { zh: '版本不兼容的包：', en: 'Incompatible packages:' },
   'plugins-install-exemptions-title': { zh: '已登记的精确版本豁免：', en: 'Exact-version exemptions recorded:' },
   'plugins-install-key-confirm': { zh: '⏎ 安装 · esc 取消', en: '⏎ install · esc cancel' },
+  'plugins-install-key-confirm-grant': { zh: '⏎ 安装并授权 {{count}} 项 · esc 取消', en: '⏎ install and grant {{count}} · esc cancel' },
   'plugins-install-key-builds': { zh: '⏎ 允许这些脚本并重试 · esc 取消', en: '⏎ allow these scripts and retry · esc cancel' },
   'plugins-install-key-incompatible': { zh: '⏎ 接受风险并重试 · esc 取消', en: '⏎ accept the risk and retry · esc cancel' },
   'plugins-install-key-cancel': { zh: 'esc 取消安装', en: 'esc cancel the install' },
@@ -1577,6 +1704,10 @@ const dict = {
   'plugins-manage-enabled': { zh: '已启用 {{target}}：{{state}}', en: 'Enabled {{target}}: {{state}}' },
   'plugins-manage-disabled': { zh: '已关闭 {{target}}：{{state}}', en: 'Disabled {{target}}: {{state}}' },
   'plugins-manage-failed': { zh: '操作失败：{{reason}}', en: 'The action failed: {{reason}}' },
+  'plugins-manage-enable-persisted': {
+    zh: 'profile 已记录这次启用，但运行中的宿主拒绝了重载：授权已保留，重启后生效。',
+    en: 'The profile recorded this enable, but the running host refused the reload: the grant is kept and takes effect after a restart.',
+  },
   'plugins-manage-incompatible': {
     zh: '版本不兼容：{{packages}}——要强行启用，先接受风险：dsh plugin --profile {{profile}} allow-version <包@版本> <当前版本> --accept-risk',
     en: 'Incompatible version: {{packages}} — to force it, accept the risk first: dsh plugin --profile {{profile}} allow-version <package@version> <running version> --accept-risk',
@@ -1593,13 +1724,41 @@ const dict = {
     zh: '用户数据仍在：{{paths}} —— 不再需要时可手动删除。',
     en: 'Your own data is still there: {{paths}} — delete it by hand when you no longer need it.',
   },
-  'plugins-manage-residue-footprint': {
-    zh: '{{id}} 仍在授权文件 / 效果台账 / 存储目录里留有足迹',
-    en: '{{id}} still has a footprint in the grants file, the effect ledger or the storage directory',
+  'plugins-manage-residue-ledger': {
+    zh: '效果台账仍有 {{id}} 的记录（审计保留）：{{file}}',
+    en: 'The effect ledger still records {{id}} (kept for audit): {{file}}',
+  },
+  'plugins-manage-residue-storage': {
+    zh: '存储目录里仍有 {{id}} 的命名空间（用户数据保留）：{{file}}',
+    en: 'A storage namespace for {{id}} is still on disk (your data is kept): {{file}}',
   },
   'plugins-manage-residue-unjudged': {
     zh: '读不到 {{target}} 的包内声明，无法判断它是否留下了用户数据（不猜）。',
     en: 'The declaration inside {{target}} could not be read, so what data it left behind cannot be judged (nothing is guessed).',
+  },
+  'plugins-manage-grant-granted': { zh: '已按声明授予 {{count}} 项权限（{{id}}）', en: 'Granted {{count}} declared permission(s) ({{id}})' },
+  'plugins-manage-grant-forgotten': { zh: '已删除该组件的授权与 deny 条目（{{id}}）', en: 'Removed this component\'s grant and deny entries ({{id}})' },
+  'plugins-manage-grant-forget-failed': {
+    zh: '⚠ 该组件的授权条目未能删除（{{reason}}）：{{id}} · {{file}} —— 复用同一 id 的包可能继承这组授权，请到 /plugin 的授权矩阵手工清理。',
+    en: '⚠ This component\'s grant entries could not be removed ({{reason}}): {{id}} · {{file}} — a package reusing the same id may inherit them; clear them by hand from the /plugin grant matrix.',
+  },
+  'plugins-manage-grant-unhandled': {
+    zh: '读不到 {{target}} 的包内声明，或它不是本 profile 能接受的声明：无法确定组件 id，授权条目未处理（不猜）。',
+    en: 'The declaration inside {{target}} could not be read, or is not one this profile accepts: its component id was not used, and grant entries were left alone (nothing is guessed).',
+  },
+  'plugins-manage-grant-revoked': { zh: '已撤销 {{count}} 项授权（{{id}}）', en: 'Revoked {{count}} permission grant(s) ({{id}})' },
+  'plugins-manage-grant-revoke-failed': {
+    zh: '已关闭，但授权条目未能撤销（{{reason}}）：{{id}} · {{file}} —— 见 /plugin 的授权矩阵。',
+    en: 'Disabled, but the grant entries could not be revoked ({{reason}}): {{id}} · {{file}} — see the /plugin grant matrix.',
+  },
+  'plugins-manage-key-enable-grant': { zh: '⏎ 启用并授权 {{count}} 项 · esc 返回', en: '⏎ enable and grant {{count}} · esc back' },
+  'plugins-manage-key-disable-revoke': {
+    zh: '⏎ 关闭并撤销 {{count}} 项授权 · esc 返回',
+    en: '⏎ disable and revoke {{count}} grant(s) · esc back',
+  },
+  'plugins-manage-remove-grant-facts': {
+    zh: '该组件的授权与 deny 条目会被删除（不可恢复）；重新安装后需要再授权一次。',
+    en: 'This component\'s grant and deny entries are deleted (not recoverable); a reinstall asks for them again.',
   },
   'plugins-manage-usage': { zh: '用法：/plugin {{sub}} <bundle 名 | 行 id>', en: 'Usage: /plugin {{sub}} <bundle name | row id>' },
   'plugins-manage-pane-title': { zh: '插件生命周期', en: 'Plugin lifecycle' },
@@ -1613,8 +1772,8 @@ const dict = {
     en: 'This is destructive: it changes the profile\'s package.json and lockfile (rolled back if the service fails) and drops its {{rows}} rows / {{overrides}} overrides. Your own data is not deleted (any residue is reported separately).',
   },
   'plugins-manage-trust-facts': {
-    zh: '无法验证已装代码的安装来源：启用后它就在本进程内运行、不自动更新、没有沙箱。它声明的权限见 /plugin 的授权矩阵。',
-    en: 'The installed code\'s source cannot be verified: once enabled it runs inside this process, with no auto-update and no sandbox. Its declared permissions are in the /plugin grant matrix.',
+    zh: '无法验证已装代码的来源：启用后它在本进程内运行、无沙箱。本页列出的权限就是要授予的内容；授权是行为约束，不是安全隔离。',
+    en: 'The installed code\'s source cannot be verified: it runs in-process with no sandbox. What this pane lists is what Enter grants; grants are behavioural constraints, not a security boundary.',
   },
   'plugins-manage-host-row-facts': {
     zh: '这一行属于宿主层（dsh-base）：关掉它会卸载本应用注入的服务，本应用可能重启或退出。',
@@ -1714,6 +1873,7 @@ const dict = {
   'question-fold-waiting': { zh: '正在等你回答', en: 'Waiting for your answer' },
   'question-fold-expand': { zh: '{{combo}} 展开', en: '{{combo}} to expand' },
   'question-fold-hint': { zh: '{{combo}} 折叠 / 点标题行收起', en: '{{combo}} to fold / click the header' },
+  'question-detail-scroll': { zh: '… {{count}} 行未显示 · {{up}}/{{down}} 翻阅', en: { one: '… {{count}} line outside view · {{up}}/{{down}} to scroll', other: '… {{count}} lines outside view · {{up}}/{{down}} to scroll' } },
   'question-submit-selection': { zh: '提交选择（Enter）', en: 'Submit selection (Enter)' },
   'question-custom-tab': { zh: '自定义回答', en: 'Custom answer' },
   'question-attached-label': { zh: '（附加：{{label}}）', en: '(attached: {{label}})' },
@@ -1730,9 +1890,11 @@ const dict = {
   'approval-always': { zh: '允许，且不再询问', en: 'Yes, and don\'t ask again' },
   'approval-hint': { zh: '↑/↓ 选择 · Enter 确认 · Esc 拒绝', en: '↑/↓ select · Enter confirm · Esc reject' },
   'approval-hint-feedback': { zh: '↑/↓/Tab 选择 · Enter 确认 · 选中拒绝后可输入理由 · Esc 拒绝', en: '↑/↓/Tab select · Enter confirm · on No, type a reason · Esc reject' },
+  'approval-hint-preview': { zh: '↑/↓ 选择 · Enter 确认 · Esc 拒绝 · {{up}}/{{down}} 翻阅预览', en: '↑/↓ select · Enter confirm · Esc reject · {{up}}/{{down}} scroll preview' },
   'approval-feedback-row': { zh: '{{label}}：{{reason}}', en: '{{label}}: {{reason}}' },
   'approval-subagent': { zh: '来自子代理 {{id}} 的请求', en: 'Requested by subagent {{id}}' },
   'approval-blocked-path': { zh: '涉及允许目录之外的路径：{{path}}', en: 'Outside the allowed directories: {{path}}' },
+  'panel-preview-omitted': { zh: '… 另有 {{count}} 行未显示', en: { one: '… {{count}} more line not shown', other: '… {{count}} more lines not shown' } },
 
   // ── components/Subagent*.tsx ────────────────────────────────────────
   'subagent-model': { zh: '模型', en: 'Model' },
@@ -1801,29 +1963,35 @@ const dict = {
   'team-task-blocked': { zh: '阻塞', en: 'blocked' },
   'team-failure': { zh: '团队记录被拒：{{failure}}', en: 'Team record rejected: {{failure}}' },
 
-  // ── /team：团队模式开关（团队 bundle 的启停，见 docs/agent-teams-design.md「开关机制」）──
+  // ── /team：团队状态（开关是 /plugin enable|disable，见 docs/agent-teams-design.md「开关机制」）──
   'team-cmd-unavailable': { zh: '当前内核没有 Agent Teams。', en: 'The current kernel has no Agent Teams.' },
-  'team-cmd-usage': { zh: '未知子命令「{{sub}}」。用法：/team [status] | on | off', en: 'Unknown subcommand "{{sub}}". Usage: /team [status] | on | off' },
+  'team-cmd-usage': { zh: '未知子命令「{{sub}}」。用法：/team [status]', en: 'Unknown subcommand "{{sub}}". Usage: /team [status]' },
+  'team-cmd-switch-moved': {
+    zh: '团队开关已改为 /plugin enable|disable {{bundle}}；/team 只报告状态。',
+    en: 'The team switch moved to /plugin enable|disable {{bundle}}; /team only reports status.',
+  },
+  'team-cmd-not-enabled': {
+    zh: '团队服务未运行（bundle 未启用、启用后尚未生效，或激活失败）。开启/应用：/plugin enable {{bundle}}；需要时重启。',
+    en: 'The team service is not running (bundle off, enabled but not applied yet, or activation failed). Enable/apply with /plugin enable {{bundle}}; restart if needed.',
+  },
+  'team-cmd-no-manager-route': {
+    zh: '本次启动没有 profile 插件服务，无法在会话内切换。在终端用 dsh plugin --profile {{profile}} add {{bundle}}@<已装 DSH 版本>（关闭用 remove），然后重启；版本须与已装 DSH 完全一致。',
+    en: 'This launch has no profile plugin service, so the team cannot be switched here. In a terminal run dsh plugin --profile {{profile}} add {{bundle}}@<your DSH version> (remove to switch off), then restart; the version must match the installed DSH exactly.',
+  },
+  'team-cmd-bundle-absent': {
+    zh: '本次运行的 DSH 安装不自带团队包（/plugin list 不显示它）：先把 DSH 换到自带团队包的版本线，再重启并开启。',
+    en: 'The running DSH installation does not ship the team bundle (/plugin list does not show it): switch DSH to a line that ships the team packages first, then restart and enable it.',
+  },
   'team-cmd-no-manager': {
-    zh: '本次启动没有 profile 插件服务，无法在会话内切换。改用：dsh plugin --profile {{profile}} add {{bundle}}（关闭用 remove），然后重启。',
-    en: 'This launch has no profile plugin service, so the team cannot be switched here. Use dsh plugin --profile {{profile}} add {{bundle}} (remove to switch off), then restart.',
+    zh: '本次启动没有 profile 插件服务：只能报告团队服务状态。',
+    en: 'This launch has no profile plugin service: only the team service state can be reported.',
   },
   'team-cmd-bundle': { zh: '团队 bundle：{{state}}', en: 'Team bundle: {{state}}' },
+  'team-cmd-bundle-unknown': { zh: '团队 bundle：未知（插件服务没有列出该包）', en: 'Team bundle: unknown (the plugin service does not list it)' },
   'team-cmd-on': { zh: '已开启', en: 'on' },
   'team-cmd-off': { zh: '已关闭', en: 'off' },
-  'team-cmd-already-on': { zh: '团队 bundle 已开启，无需改动。', en: 'The team bundle is already on; nothing to change.' },
-  'team-cmd-not-installed': {
-    zh: '团队 bundle 未安装。在这里安装：/plugin install {{bundle}}（装完即开启）；或在终端：dsh plugin --profile {{profile}} add {{bundle}}',
-    en: 'The team bundle is not installed. Install it here with /plugin install {{bundle}} (it is switched on once installed), or in a terminal with dsh plugin --profile {{profile}} add {{bundle}}',
-  },
-  'team-cmd-kernel-unsupported': {
-    zh: '运行中的 DSH {{version}} 没有本应用能读取的团队 bundle：先把 DSH 换成 {{lines}} 之一，再安装同版本的团队 bundle。',
-    en: 'The running DSH {{version}} has no team bundle this app can read: switch DSH to one of {{lines}} first, then install the team bundle of that same version.',
-  },
-  'team-cmd-off-not-installed': { zh: '团队 bundle 未安装，团队本就是关闭的，无需改动。', en: 'The team bundle is not installed, so the team is already off; nothing to change.' },
   'team-cmd-service': { zh: '团队服务：{{state}}', en: 'Team service: {{state}}' },
   'team-cmd-running': { zh: '运行中', en: 'running' },
-  'team-cmd-stopped': { zh: '未运行', en: 'not running' },
   'team-cmd-pending-on': { zh: 'profile 已开启团队，但服务没有运行：重启后生效，或服务激活失败（见日志）。', en: 'The profile has the team on but the service is not running: it applies after a restart, or the service failed to activate (see the log).' },
   'team-cmd-pending-off': { zh: 'profile 已关闭团队，但服务仍在运行：重启后生效。', en: 'The profile has the team off but the service is still running: it applies after a restart.' },
   'team-cmd-no-members': { zh: '本会话没有 teammate。', en: 'No teammates in this session.' },
@@ -2071,9 +2239,10 @@ const dict = {
   'provider-cancelled': { zh: '已取消添加 provider', en: 'Provider setup cancelled' },
   'provider-success': { zh: 'provider {{route}} 已添加', en: 'Provider {{route}} added' },
   'provider-switch-hint': { zh: '运行 /model 可切换到新 provider 的模型', en: 'Run /model to switch to the new provider’s models' },
-  'provider-q-switch': { zh: '立即切换到新 provider？', en: 'Switch to the new provider now?' },
+  'provider-q-switch': { zh: '要切换到新 provider 的哪个模型？', en: 'Switch to which model from the new provider?' },
   'provider-opt-switch-now': { zh: '切换到 {{model}}', en: 'Switch to {{model}}' },
   'provider-opt-switch-keep': { zh: '保持当前模型', en: 'Keep the current model' },
+  'provider-opt-switch-keep-desc': { zh: '当前：{{model}}', en: 'Current: {{model}}' },
   // /provider OAuth 分支（内置 OAuth 模块挂载 ctx.dshAuth 时出现）
   'provider-opt-oauth': { zh: '账号登录（OAuth）', en: 'Account sign-in (OAuth)' },
   'provider-opt-oauth-desc': { zh: '使用当前宿主支持的账号登录，无需 API key', en: 'Sign in with an account supported by this host — no API key' },
@@ -2207,7 +2376,7 @@ const dict = {
   'cmd-desc-migrate': { zh: '从其他编程代理导入对话（claude-code/codex/omp/zcode/grok-build）' },
   'cmd-desc-init': { zh: '在工作目录创建 AGENTS.md' },
   'cmd-desc-agents': { zh: '查看本会话的子代理' },
-  'cmd-desc-team': { zh: '团队模式：查看状态，或 on / off 开关（启停 Agent Teams bundle）' },
+  'cmd-desc-team': { zh: '团队模式：团队服务运行时查看状态（开关用 /plugin enable|disable）' },
   'cmd-desc-jobs': { zh: '查看本会话的后台任务' },
   'cmd-desc-panel': { zh: '侧栏面板：开关 / 聚焦 / 缩放 / 切换', en: 'Side panel: toggle / focus / zoom / switch' },
   'cmd-desc-kernel': { zh: '选择内核（切换后重启进入）', en: 'Choose the kernel (restarts into it)' },
@@ -2327,7 +2496,7 @@ const dict = {
   'sugg-panel-zoom-desc': { zh: '缩放当前面板', en: 'Zoom the active panel' },
   'sugg-panel-id-desc': { zh: '打开该面板', en: 'Open this panel' },
   // /plugin 的子命令提示（补全树；动态实参见 plugin-completions.ts）
-  'sugg-plugin-list-desc': { zh: '列出你装的额外插件', en: 'List the plugins this profile added' },
+  'sugg-plugin-list-desc': { zh: '列出额外插件与实验性功能', en: 'List added plugins and experimental features' },
   'sugg-plugin-info-desc': { zh: '查单个条目或待装 spec', en: 'Describe an installed plugin or an install spec' },
   'sugg-plugin-registries-desc': { zh: '查看安装源', en: 'Show where installations ask' },
   'sugg-plugin-check-desc': { zh: '校验清单，不安装', en: 'Validate a manifest without installing it' },
@@ -2357,7 +2526,7 @@ const dict = {
   'cmd-desc-hooks': { zh: '查看 hooks 状态' },
   'cmd-desc-mcp': { zh: '查看 MCP 状态' },
   'cmd-desc-skills': { zh: '列出所有可用技能' },
-  'cmd-desc-plugin': { zh: '插件诊断；`list` 列你装的额外插件，`info` 查单个条目或待装 spec' },
+  'cmd-desc-plugin': { zh: '插件诊断；`list` 列额外插件与可开启的实验性功能，`info` 查单个条目或待装 spec' },
   'cmd-desc-update': { zh: '更新 dsh-tui 并重启' },
   // Misc
   'cmd-desc-vim': { zh: '切换 vim 模式' },
@@ -2428,8 +2597,7 @@ const dict = {
 
   // ── screens/Launchpad.tsx（开屏落地页：取代旧的"只有标题的空白会话"）───────
   // 落地页是"启动后第一屏"：大标题与吉祥物居中、输入框在下、再往下是
-  // 信息与快捷入口。用户真正发出第一条内容后才进聊天页，所以这里的
-  // 文案要短、要是动作而不是说明。
+  // 信息与快捷入口。发送首句或开始多行编辑时进入聊天页；这里的文案要短。
   'launchpad-placeholder': { zh: '说点什么，或输入 / 看命令…', en: 'Say something, or type / for commands…' },
   // （launchpad-param-*-label / launchpad-param-mode-* 六键已删：2026-10 第四版
   // 参数行只画值不画字段名——用户原话"大家都知道是模型啊，不用画蛇添足"；
@@ -2442,8 +2610,8 @@ const dict = {
   // 轮换顺序 = launchpad-tip → launchpad-tip-2 → launchpad-tip-3 → 回到首条；
   // 首启那一条（launchpad-first-run）优先级最高，不参与轮换。
   'launchpad-tip-2': {
-    zh: 'Ctrl+V 直接粘贴，Esc 清空后按 Esc 去看历史会话',
-    en: 'Ctrl+V pastes; Esc clears the draft, then Esc again opens sessions',
+    zh: 'Ctrl+V 直接粘贴，Shift+Enter 进入聊天页换行',
+    en: 'Ctrl+V pastes; Shift+Enter opens chat with a newline',
   },
   'launchpad-tip-3': {
     zh: '参数行四段都能点：模型 · 思考深度 · 模式 · 权限',
@@ -2666,10 +2834,10 @@ const dict = {
   // ── screens/Onboarding.tsx（首次引导：四步把常用配置配好）────────────────
   'onboarding-title': { zh: '欢迎使用 dsh-TUI', en: 'Welcome to dsh-TUI' },
   'onboarding-step-progress': { zh: '第 {{n}} / {{total}} 步', en: 'Step {{n}} of {{total}}' },
-  'onboarding-step-apikey-title': { zh: 'API Key 与连通性', en: 'API key and connectivity' },
-  'onboarding-step-apikey-desc': {
-    zh: '确认 DEEPSEEK_API_KEY 已就位，并真的连一次服务端。',
-    en: 'Confirm DEEPSEEK_API_KEY is in place and actually reach the API.',
+  'onboarding-step-access-title': { zh: '账号与模型接入', en: 'Accounts and models' },
+  'onboarding-step-access-desc': {
+    zh: '登录订阅账号或加一个 API key，再把接入进来的模型选一个作为默认。',
+    en: 'Sign in to a subscription or add an API key, then pick one of the models it brings in as the default.',
   },
   'onboarding-step-look-title': { zh: '语言与主题', en: 'Language and theme' },
   'onboarding-step-look-desc': {
@@ -2686,23 +2854,74 @@ const dict = {
     zh: '几个最省时间的键和最常用的命令，每一张都能直接点开试试。',
     en: 'The few keys and commands that save the most time — click any card to try it.',
   },
-  // 第一步：凭证与连通性。分流口径与 adapter 的 CredentialStatus /
-  // BalanceResult 一一对应，排查建议按原因分开给，而不是一句"检查网络"。
+  // 第一步：账号与模型接入。上半是状态（凭证 + 订阅登录，只报掩码事实），
+  // 下半是动作行——登录与"加 API key"都由 Chat 交给既有流程执行。
   'onboarding-key-checking': { zh: '正在读取凭证…', en: 'Reading credentials…' },
   'onboarding-key-configured': { zh: '已检测到 DEEPSEEK_API_KEY', en: 'DEEPSEEK_API_KEY detected' },
   'onboarding-key-source-env': { zh: '来源：环境变量', en: 'Source: environment variable' },
   'onboarding-key-source-config': { zh: '来源：配置文件', en: 'Source: config file' },
   'onboarding-key-source-unknown': { zh: '来源：未知', en: 'Source: unknown' },
   'onboarding-key-missing': { zh: '还没检测到 DEEPSEEK_API_KEY', en: 'No DEEPSEEK_API_KEY yet' },
+  'onboarding-key-optional': { zh: '未配置 DEEPSEEK_API_KEY（只有 DeepSeek 官方 API 需要）', en: 'DEEPSEEK_API_KEY is not set (only the DeepSeek official API needs it)' },
   'onboarding-key-shape': { zh: '形如 sk-…（只判断存在与否，永远不显示完整值）', en: 'Looks like sk-… (presence only — the value is never printed)' },
-  'onboarding-key-howto-env': { zh: '设置一个环境变量再重启：', en: 'Set an environment variable and restart:' },
-  'onboarding-key-howto-config': { zh: '或写进 dsh 的配置里：', en: 'Or put it in the dsh config:' },
-  'onboarding-key-retry': { zh: '重新检查', en: 'Check again' },
+  'onboarding-access-oauth-in': { zh: '已登录：{{providers}}（共 {{n}} 个账号）', en: 'Signed in: {{providers}} ({{n}} accounts)' },
+  'onboarding-access-oauth-none': { zh: '还没有登录任何订阅账号', en: 'No subscription account signed in yet' },
+  'onboarding-access-action-signin': { zh: '登录订阅账号（OAuth）', en: 'Sign in to a subscription (OAuth)' },
+  'onboarding-access-action-signin-desc': {
+    zh: 'ChatGPT / Claude / Grok 等订阅，或 DeepSeek 账号浏览器授权（已登录 {{signed}} / {{total}}）',
+    en: 'ChatGPT / Claude / Grok subscriptions, or DeepSeek account browser sign-in ({{signed}} / {{total}} signed in)',
+  },
+  'onboarding-access-action-add': { zh: '添加模型提供方（API key）', en: 'Add a model provider (API key)' },
+  'onboarding-access-action-add-desc': {
+    zh: '内置目录或自定义端点，密钥写进 DSH 凭据库（与 /provider 同一条路）',
+    en: 'A built-in catalog or a custom endpoint; the key goes into the DSH credential store (the same path as /provider)',
+  },
+  'onboarding-access-action-recheck': { zh: '重新检查', en: 'Check again' },
+  'onboarding-access-action-recheck-desc': {
+    zh: '重读凭证、登录状态与可用模型',
+    en: 'Re-read credentials, sign-in state and available models',
+  },
+  'onboarding-access-action-next': { zh: '跳过这一步', en: 'Skip this step' },
+  'onboarding-access-action-next-desc': {
+    zh: '之后随时可用 /provider 或 /auth 配置',
+    en: 'You can configure it later with /provider or /auth',
+  },
+  'onboarding-access-fallback': { zh: '当前组合里没有可用的接入入口，也可以手工配置：', en: 'No in-app access route is available in this composition; you can also configure it by hand:' },
+  'onboarding-access-fallback-signin': { zh: '当前组合里订阅登录不可用', en: 'Subscription sign-in is not available in this composition' },
+  'onboarding-access-fallback-provider': { zh: '/provider 需要经 dsh profile 启动', en: '/provider needs a launch through a dsh profile' },
+  'onboarding-access-fallback-env': { zh: '环境变量（重启生效）：', en: 'Environment variable (takes effect after a restart):' },
+  'onboarding-access-fallback-powershell': { zh: 'PowerShell: [Environment]::SetEnvironmentVariable(\'DEEPSEEK_API_KEY\',\'sk-…\',\'User\')', en: 'PowerShell: [Environment]::SetEnvironmentVariable(\'DEEPSEEK_API_KEY\',\'sk-…\',\'User\')' },
+  'onboarding-access-fallback-cmd': { zh: 'cmd: setx DEEPSEEK_API_KEY "sk-…"', en: 'cmd: setx DEEPSEEK_API_KEY "sk-…"' },
+  'onboarding-access-fallback-store': { zh: '或写进 DSH 凭据库的 refs 段（默认位置）：', en: 'Or write it into the DSH credential store\'s refs block (default location):' },
+  'onboarding-access-fallback-store-path': { zh: '~/.dsh/.credentials.yaml（DSH_HOME 覆盖时随之改变）', en: '~/.dsh/.credentials.yaml (moves with a DSH_HOME override)' },
+  'onboarding-access-signin-title': { zh: '选择要登录的账号', en: 'Choose an account to sign in' },
+  'onboarding-access-signin-hint': { zh: '**↑/↓** 选账号 · **Enter** 登录 · **Esc** 返回', en: '**↑/↓** pick · **Enter** sign in · **Esc** back' },
+  'onboarding-access-oauth-row': { zh: '{{provider}} — {{state}}', en: '{{provider}} — {{state}}' },
+  'onboarding-access-back': { zh: '← 返回', en: '← Back' },
+  'onboarding-access-in-flight': { zh: '上一项配置还在进行：接下来的问题会在问答面板里弹出，结束后这里显示结果', en: 'A configuration is still in progress: its next questions open in the question panel, and the result shows here when it ends' },
+  'onboarding-access-action-busy-desc': { zh: '上一项配置结束前不能再发起', en: 'Unavailable until the current configuration ends' },
+  'onboarding-access-cancelled': { zh: '已取消，没有写入任何东西', en: 'Cancelled — nothing was written' },
+  'onboarding-access-action-failed': { zh: '这次配置没有完成，可以重试或换一种方式', en: 'That configuration did not complete — retry, or use another route' },
+  'onboarding-access-action-failed-reason': { zh: '这次配置没有完成：{{reason}}', en: 'That configuration did not complete: {{reason}}' },
+  'onboarding-access-changed': { zh: '设置已更新，没有新增模型', en: 'Settings updated; no models were added' },
+  'onboarding-access-added-none': { zh: '这次没有新增可用模型（若取消了登录，可再试一次）', en: 'No new models this time (if you cancelled the sign-in, try again)' },
+  'onboarding-access-added-none-for': { zh: '{{provider}} 这次没有新增可用模型', en: '{{provider}} brought in no new models this time' },
+  'onboarding-access-added-auto': { zh: '已接入 {{provider}}，默认模型设为 {{name}}', en: 'Adopted {{provider}}; default model set to {{name}}' },
+  'onboarding-access-added-provider': { zh: '已接入 {{provider}} 的 {{n}} 个模型；默认模型：{{model}}', en: 'Added {{n}} models from {{provider}}; default model: {{model}}' },
+  'onboarding-access-adopt-title': { zh: '{{provider}} 接入 {{n}} 个可用模型', en: '{{provider}} brought in {{n}} models' },
+  'onboarding-access-adopt-title-multi': { zh: '接入 {{n}} 个可用模型（{{providers}} 个 provider）', en: '{{n}} models became available ({{providers}} providers)' },
+  'onboarding-access-adopt-note': {
+    zh: '登录后这些模型都已可用（/model 里随时能换）；这里只选一个作为默认模型。',
+    en: 'All of these are usable now that you are signed in (switch anytime in /model); this only picks the default model.',
+  },
+  'onboarding-access-adopt-hint': { zh: '**↑/↓** 移动 · **Enter** 设为默认 · **Esc** 保持当前模型', en: '**↑/↓** moves · **Enter** sets the default · **Esc** keeps the current model' },
+  'onboarding-access-adopt-cancelled': { zh: '已保持当前模型；新模型都已可用，随时可在 /model 里切换', en: 'Kept the current model; the new models are all available and can be switched in /model anytime' },
   'onboarding-conn-running': { zh: '正在连接 DeepSeek…', en: 'Connecting to DeepSeek…' },
   'onboarding-conn-ok': { zh: '连通正常', en: 'Connected' },
   'onboarding-conn-models': { zh: '{{count}} 个可用模型', en: '{{count}} models available' },
   'onboarding-conn-balance': { zh: '余额 {{amount}}', en: 'Balance {{amount}}' },
   'onboarding-conn-balance-none': { zh: '本次没有返回余额信息', en: 'No balance returned this time' },
+  'onboarding-conn-skipped': { zh: '已跳过 DeepSeek 余额检查（它只针对 DeepSeek 官方 key）；已接入：{{providers}}', en: 'Skipped the DeepSeek balance check (it only covers the DeepSeek official key); connected: {{providers}}' },
   'onboarding-conn-fail-no-key': { zh: '没有可用的凭证，连通性检查没法开始', en: 'No usable credential, so the check cannot start' },
   'onboarding-conn-fail-network': { zh: '网络不通：检查代理、防火墙或离线环境', en: 'Network unreachable: check proxy, firewall or offline setup' },
   'onboarding-conn-fail-unauthorized': { zh: '凭证被拒绝：检查 key 是否复制完整、是否已失效', en: 'Credential rejected: check the key is complete and still valid' },
@@ -2748,7 +2967,7 @@ const dict = {
     zh: '这次引导没能记进 ~/.dsh-tui/onboarding.json，下次启动可能还会再问一次',
     en: 'Could not record the guide in ~/.dsh-tui/onboarding.json, so it may ask again next launch',
   },
-  'cmd-desc-setup': { zh: '重跑首次引导（API Key / 语言主题 / 模型工作区 / 快捷键）' },
+  'cmd-desc-setup': { zh: '重跑首次引导（账号与模型接入 / 语言主题 / 模型工作区 / 快捷键）' },
 } as const satisfies Record<string, { zh: I18nText; en?: I18nText }>
 
 export type I18nKey = keyof typeof dict

@@ -23,6 +23,8 @@
  *
  * Run: node scripts/verify-update.mjs
  */
+import fs from 'node:fs'
+import { syncBuiltinESMExports } from 'node:module'
 import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -120,6 +122,13 @@ function copyUpdateModule(dstDir) {
   mkdirSync(join(dstDir, 'agent'), { recursive: true })
   mkdirSync(join(dstDir, 'backends', 'shared'), { recursive: true })
   cpSync(compiledModulePath, join(dstDir, 'update.js'))
+  cpSync(new URL('../lib/types/updateProcess.js', import.meta.url), join(dstDir, 'updateProcess.js'))
+  cpSync(new URL('../lib/types/windowsInstaller.js', import.meta.url), join(dstDir, 'windowsInstaller.js'))
+  const packageRoot = dstDir.endsWith(join('lib', 'types')) ? join(dstDir, '..', '..') : join(dstDir, '..')
+  mkdirSync(join(packageRoot, 'assets'), { recursive: true })
+  for (const name of ['windows-installer.ps1', 'windows-installer.cs']) {
+    cpSync(new URL('../assets/' + name, import.meta.url), join(packageRoot, 'assets', name))
+  }
   cpSync(compiledShellQuotePath, join(dstDir, 'utils', 'shellQuote.js'))
   cpSync(compiledPathsPath, join(dstDir, 'utils', 'paths.js'))
   cpSync(compiledSessionHistoryPath, join(dstDir, 'sessionHistory.js'))
@@ -184,6 +193,71 @@ try {
     foreignMod.installedTuiVersion() === undefined,
     `got ${foreignMod.installedTuiVersion()}`,
   )
+
+  // Launcher migration must work from both published and source layouts.
+  const oldRoot = join(scratch, 'old-global')
+  mkdirSync(join(oldRoot, 'bin'), { recursive: true })
+  const oldManifest = JSON.stringify({ name: '@deepseek-harness-tui/dsh-tui', version: '0.1.0' })
+  const oldBin = '#!/usr/bin/env node\n// old launcher\n'
+  const savedArgv1 = process.argv[1]
+  const resetGlobal = () => {
+    writeFileSync(join(oldRoot, 'package.json'), oldManifest)
+    writeFileSync(join(oldRoot, 'bin', 'dsh-tui.js'), oldBin)
+  }
+  try {
+    for (const [root, mod, layout] of [[sourceRoot, sourceMod, 'source'], [pkgRoot, pkgMod, 'compiled']]) {
+      mkdirSync(join(root, 'bin'), { recursive: true })
+      const newBin = `#!/usr/bin/env node\n// ${layout} launcher\n`
+      writeFileSync(join(root, 'bin', 'dsh-tui.js'), newBin)
+      resetGlobal()
+      process.argv[1] = join(oldRoot, 'bin', 'dsh-tui.js')
+      check(`launcher migration succeeds in ${layout} layout`, mod.migrateGlobalLauncher())
+      check(`${layout} migration copies both files`,
+        readFileSync(process.argv[1], 'utf8') === newBin
+        && readFileSync(join(oldRoot, 'package.json'), 'utf8') === readFileSync(join(root, 'package.json'), 'utf8'))
+
+      const alias = join(scratch, `${layout}-alias`)
+      symlinkSync(root, alias, process.platform === 'win32' ? 'junction' : 'dir')
+      process.argv[1] = join(alias, 'bin', 'dsh-tui.js')
+      check(`${layout} migration refuses its own realpath`, mod.migrateGlobalLauncher() === false)
+      check(`${layout} self migration creates no staging file`, !existsSync(`${process.argv[1]}.dsh-tui-migrate`))
+    }
+    process.argv[1] = join(oldRoot, 'bin', 'dsh-tui.js')
+    const sourceManifestPath = join(pkgRoot, 'package.json')
+    const sourceManifest = readFileSync(sourceManifestPath)
+    resetGlobal()
+    writeFileSync(sourceManifestPath, '{broken')
+    check('invalid source manifest prevents either write', pkgMod.migrateGlobalLauncher() === false
+      && readFileSync(process.argv[1], 'utf8') === oldBin)
+    writeFileSync(sourceManifestPath, sourceManifest)
+    rmSync(join(pkgRoot, 'bin', 'dsh-tui.js'))
+    check('missing source bin prevents either write', pkgMod.migrateGlobalLauncher() === false
+      && readFileSync(join(oldRoot, 'package.json'), 'utf8') === oldManifest)
+    writeFileSync(join(pkgRoot, 'bin', 'dsh-tui.js'), '// new launcher\n')
+    writeFileSync(join(oldRoot, 'package.json'), '{broken')
+    check('invalid destination manifest is not replaced', pkgMod.migrateGlobalLauncher() === false
+      && readFileSync(join(oldRoot, 'package.json'), 'utf8') === '{broken')
+    resetGlobal()
+    const savedWrite = fs.writeFileSync
+    try {
+      fs.writeFileSync = (target, ...args) => {
+        if (String(target).startsWith(oldRoot) && String(target).endsWith('.dsh-tui-migrate')) {
+          throw Object.assign(new Error('fixture permission failure'), { code: 'EACCES' })
+        }
+        return savedWrite(target, ...args)
+      }
+      syncBuiltinESMExports()
+      check('permission failure returns false without replacing either file', pkgMod.migrateGlobalLauncher() === false
+        && readFileSync(process.argv[1], 'utf8') === oldBin
+        && readFileSync(join(oldRoot, 'package.json'), 'utf8') === oldManifest)
+    } finally {
+      fs.writeFileSync = savedWrite
+      syncBuiltinESMExports()
+    }
+  } finally {
+    if (savedArgv1 === undefined) delete process.argv[1]
+    else process.argv[1] = savedArgv1
+  }
 } finally {
   rmSync(scratch, { recursive: true, force: true })
 }
@@ -445,17 +519,17 @@ check(
       `${JSON.stringify(outcome)} :: ${text}`,
     )
 
-    // Case 3b: the same entry is KEPT when it is the second exemption
-    // (alsoExempt) — the locked version still inside the release-age window.
+    // Case 3b: the same version is KEPT when it is the second exemption
+    // (alsoExempt) — the locked version still inside the release-age window —
+    // joined to the target in one union entry.
     writeFileSync(yamlPath, "minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.9.3'\n")
     outcome = ensureProfileReleaseAgeExclude('tui', '0.10.0-beta.1', '0.9.3')
     text = readFileSync(yamlPath, 'utf8')
     check(
       'releaseAge: alsoExempt keeps the locked version alongside the target',
       outcome !== undefined && outcome.changed === true &&
-        text.includes("- 'x@1.0.0'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.9.3'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.10.0-beta.1'"),
+        text.includes("minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.10.0-beta.1 || 0.9.3'\n") &&
+        (text.match(/@deepseek-harness-tui\/dsh-tui@/g) ?? []).length === 1,
       `${JSON.stringify(outcome)} :: ${text}`,
     )
 
@@ -487,22 +561,18 @@ check(
 
     // Case 3e (issue #1205): two releases inside the window — the locked old
     // version is exempted together with the target, so the lockfile entry
-    // pnpm verifies before the swap installs too. Target-first order is
-    // load-bearing on pnpm 11.7.x, which honours only the first entry per
-    // package (11.21.x applies every entry regardless of order): the target
-    // is the version the swap itself resolves, and the locked version may be
-    // a dev build the registry cannot resolve at all.
+    // pnpm verifies before the swap installs too. One union entry, not two:
+    // pnpm 11.5.x–11.7.x honour only the first entry per package, so a
+    // second entry for the locked version is ignored there (issue #1605).
     writeFileSync(yamlPath, "minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.11.2'\n")
     outcome = ensureProfileReleaseAgeExclude('tui', '0.12.0', '0.11.2')
     text = readFileSync(yamlPath, 'utf8')
     check(
-      'releaseAge: same-day double release exempts locked + target (#1205)',
+      'releaseAge: same-day double release exempts locked + target in one entry (#1205, #1605)',
       outcome !== undefined && outcome.changed === true &&
-        text.includes("- 'x@1.0.0'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.11.2'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.12.0'") &&
-        text.indexOf("- '@deepseek-harness-tui/dsh-tui@0.12.0'") <
-          text.indexOf("- '@deepseek-harness-tui/dsh-tui@0.11.2'"),
+        JSON.stringify(outcome.entries) === JSON.stringify(['x@1.0.0', '@deepseek-harness-tui/dsh-tui@0.12.0 || 0.11.2']) &&
+        text.includes("minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.12.0 || 0.11.2'\n") &&
+        (text.match(/@deepseek-harness-tui\/dsh-tui@/g) ?? []).length === 1,
       `${JSON.stringify(outcome)} :: ${text}`,
     )
     const doubleBefore = readFileSync(yamlPath, 'utf8')
@@ -520,10 +590,21 @@ check(
     check(
       'releaseAge: older own entry dropped once no longer needed',
       outcome !== undefined && outcome.changed === true &&
-        text.includes("- 'x@1.0.0'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.12.0'") &&
-        text.includes("- '@deepseek-harness-tui/dsh-tui@0.13.0'") &&
-        !text.includes('0.11.2'),
+        text.includes("minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.13.0 || 0.12.0'\n") &&
+        (text.match(/@deepseek-harness-tui\/dsh-tui@/g) ?? []).length === 1,
+      `${JSON.stringify(outcome)} :: ${text}`,
+    )
+
+    // Case 3g: the pre-#1605 two-entry pair collapses into the union, which
+    // pnpm 11.5.x–11.7.x read whole.
+    writeFileSync(yamlPath, "minimumReleaseAgeExclude:\n  - '@deepseek-harness-tui/dsh-tui@0.16.1'\n  - '@deepseek-harness-tui/dsh-tui@0.16.0'\n  - 'x@1.0.0'\n")
+    outcome = ensureProfileReleaseAgeExclude('tui', '0.16.1', '0.16.0')
+    text = readFileSync(yamlPath, 'utf8')
+    check(
+      'releaseAge: legacy two-entry pair rewritten as one union entry (#1605)',
+      outcome !== undefined && outcome.changed === true &&
+        text.includes("minimumReleaseAgeExclude:\n  - 'x@1.0.0'\n  - '@deepseek-harness-tui/dsh-tui@0.16.1 || 0.16.0'\n") &&
+        (text.match(/@deepseek-harness-tui\/dsh-tui@/g) ?? []).length === 1,
       `${JSON.stringify(outcome)} :: ${text}`,
     )
 

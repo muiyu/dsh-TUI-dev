@@ -12,7 +12,7 @@ import type { SessionModeSpec } from '../sessionModes.js'
 import type { NotificationMethod, TaskNotifications } from '../ink/terminal-notification.js'
 import { parseBackendChoice } from './backend-registry.js'
 import { parseBackendId, type KernelBackendId } from '../kernelPrefs.js'
-import { BTW_CONTEXT_BUDGET_DEFAULT, BTW_CONTEXT_TURNS_DEFAULT, DEFAULT_COMPANION_SKIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, normalizeBtwContextBudget, normalizeBtwContextTurns, normalizeCompanionSkin, normalizePageMargin, normalizeSidePanelPanels, normalizeSidePanelRatio, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { ALL_SIDE_PANELS, BTW_CONTEXT_BUDGET_DEFAULT, BTW_CONTEXT_TURNS_DEFAULT, DEFAULT_COMPANION_SKIN, DEFAULT_STATUS_BAR, normalizeBtwContextBudget, normalizeBtwContextTurns, normalizeCompanionSkin, normalizePageMargin, normalizeSidePanelPanels, normalizeSidePanelRatio, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from '../utils/keymap.js'
 import { normalizeSplashFont, type SplashFontSetting } from '../components/splashFonts.js'
 import { normalizeBrandSetting, type BrandSetting } from '../branding.js'
@@ -186,7 +186,8 @@ export interface Config {
   smoothStreaming?: boolean
   /** Successful task notifications: off, unfocused (default), or always. */
   taskNotifications?: TaskNotifications
-  /** Terminal notification transport: auto (default), OSC 9, or BEL. */
+  /** Notification transport: auto (default), OSC 9, BEL, or the native Windows
+   *  toast, which off Windows resolves back to the probed terminal protocol. */
   notificationMethod?: NotificationMethod
   /** Mermaid diagrams (settings `dsh-tui.mermaidDiagrams`): ```mermaid
    *  fences in replies render as Unicode box-drawing art — flowcharts,
@@ -245,9 +246,12 @@ export interface Config {
     /** Chat column as a fraction of the content width, clamped to 0.1–0.95
      *  (default 0.68); +/- while the panel is focused nudges it live. */
     ratio?: number
-    /** Enabled panel ids, comma-separated, in PanelBar order (default:
-     *  all eight built-in panels). A
-     *  malformed id is dropped, an unknown one survives for a plugin. */
+    /** Which panels the side-panel bar shows, in PanelBar order. `*` (the
+     *  default) means every registered panel — built-ins plus whatever a
+     *  plugin registers later; an explicit comma list means exactly those ids
+     *  (an unknown-but-well-formed id stays as a placeholder for a plugin).
+     *  Registration never rewrites this value: a malformed id is dropped, the
+     *  rest keep their order. */
     panels?: string
   }
   /** Companion pet (settings `dsh-tui.companion.*`): which skin the panel
@@ -363,7 +367,7 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
   expandEditor: Schema.boolean().default(true),
   smoothStreaming: Schema.boolean().default(true),
   taskNotifications: Schema.union(['off', 'unfocused', 'always']),
-  notificationMethod: Schema.union(['auto', 'osc9', 'bel']),
+  notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
   mermaidDiagrams: Schema.boolean().default(true),
   codeFrameStyle: Schema.union(['light', 'full']),
   mathRendering: Schema.union(['auto', 'image', 'unicode', 'source']),
@@ -399,6 +403,8 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
     activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
     trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
     shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
+    pluginFields: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginFields),
+    pluginFieldsOrder: Schema.string().default(DEFAULT_STATUS_BAR.pluginFieldsOrder),
   }).default({ ...DEFAULT_STATUS_BAR }),
   // Side-panel preferences, same shape as statusBar: every member carries a
   // default so an unset cordis.yml block and a partially hand-written one
@@ -412,10 +418,10 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
       value => normalizeSidePanelRatio(value),
     ),
     panels: Schema.transform(
-      Schema.string().default(DEFAULT_SIDE_PANEL_IDS),
+      Schema.string().default(ALL_SIDE_PANELS),
       value => normalizeSidePanelPanels(value),
     ),
-  }).default({ splitEnabled: true, open: false, ratio: 0.68, panels: DEFAULT_SIDE_PANEL_IDS }),
+  }).default({ splitEnabled: true, open: false, ratio: 0.68, panels: ALL_SIDE_PANELS }),
   companion: Schema.object({
     skin: Schema.transform(
       Schema.string().default(DEFAULT_COMPANION_SKIN),
@@ -499,16 +505,19 @@ export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promis
 /** The row under the entry's screen: the DSH side in its own runtime fiber
  *  once the Loader settled, never a second render; a recompose stays idle. */
 function attachToEntry(ctx: Context, config: RuntimeConfig<Config>): void {
-  const attach = takeEntryAttach()
-  if (attach === undefined) {
-    ctx.logger.warn('dsh-tui: the entry\'s screen already holds a DSH session; this dsh-tui row stays idle')
-    return
-  }
   let disposed = false
   ctx.effect(() => () => { disposed = true })
   const loader = ctx.get('loader') as { await(): Promise<unknown> } | undefined
   void (loader?.await() ?? ctx.fiber.await()).then(() => {
     if (disposed) return
+    // Taken only now: a row that unloads before the Loader settled leaves the
+    // first attach to the next row. A later row takes over only once the
+    // previous one unloaded (#1651).
+    const attach = takeEntryAttach() ?? peekEntrySlot()?.reattachDsh?.()
+    if (attach === undefined) {
+      ctx.logger.warn('dsh-tui: the entry\'s screen already holds a DSH session; this dsh-tui row stays idle')
+      return
+    }
     return ctx.plugin({
       name: 'dsh-tui-runtime',
       apply: (runtimeCtx: Context) => attach(runtimeCtx, config, ctx),
@@ -525,9 +534,9 @@ function attachToEntry(ctx: Context, config: RuntimeConfig<Config>): void {
 // (scripts/verify-public-config-types.mjs compiles a real consumer file against
 // the published declarations), and from here on it may only grow — removing any
 // of it is a breaking change. What is NOT here: the registry, the loader and the
-// picker. Those stay the host's, and the stage C install chain is where a mounted
-// bundle's declaration reaches them (the admission chain itself is wired; see
-// docs/plugins.md).
+// picker. Those stay the host's; an installed bundle's declaration reaches them
+// through the boot-time assembly (`backend-assembly.ts`, D-1) on top of the W-2
+// admission chain (see docs/plugins.md).
 export {
   BACKEND,
   BACKEND_CAPABILITY_NAMES,

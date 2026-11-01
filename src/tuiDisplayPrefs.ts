@@ -1,6 +1,20 @@
 import type { ToolBackground, ScrollGutterMode, PageMarginSetting, PageMarginMode, PageMarginSpec, StatusBarConfig, JobGroupFoldMode } from './adapter/ports/channel-display.js'
 export type { ToolBackground, ScrollGutterMode, PageMarginSetting, PageMarginMode, PageMarginSpec, StatusBarConfig, JobGroupFoldMode } from './adapter/ports/channel-display.js'
 
+/** Where a plugin footer field joins the status row, in the list order the
+ *  user's `statusBar.pluginFieldsOrder` groups map onto by index. Kept
+ *  structurally identical to `TuiStatusFieldSlot` in `dsh-adapter/status.ts`
+ *  (a script compares the two literal sets). */
+export const STATUS_FIELD_SLOTS = ['left-tail', 'right-head', 'right-tail'] as const
+export type StatusFieldSlot = typeof STATUS_FIELD_SLOTS[number]
+
+/** `statusBar.pluginFieldsOrder`'s "show everything" token — the default. */
+export const ALL_PLUGIN_FIELDS = '*'
+
+/** The key grammar `tuiStatus.setField` admits, so the settings layer can
+ *  never write a key the admission would reject. Kept in step with
+ *  KEY_PATTERN in `dsh-adapter/status.ts` (a script compares the sources). */
+const PLUGIN_FIELD_KEY = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/u
 
 /** Defaults keep the essential route/context information visible. */
 export const DEFAULT_STATUS_BAR: Readonly<StatusBarConfig> = Object.freeze({
@@ -26,12 +40,133 @@ export const DEFAULT_STATUS_BAR: Readonly<StatusBarConfig> = Object.freeze({
   activity: false,
   trajectory: false,
   shortcutHint: false,
+  // Third-party text in permanent chrome: on by default (a plugin that
+  // registered a field asked to be seen), with one switch to silence all of
+  // them without disabling the plugins.
+  pluginFields: true,
+  // The per-field layer under `pluginFields`: `*` is "all of them, each in its
+  // plugin-declared slot, registration order" — i.e. the behaviour before this
+  // key existed, so an upgrade changes nothing.
+  pluginFieldsOrder: ALL_PLUGIN_FIELDS,
 })
 
 const TOOL_BACKGROUNDS = new Set<ToolBackground>(['none', 'subtle', 'strong'])
 const JOB_GROUP_FOLDS = new Set<JobGroupFoldMode>(['auto', 'always', 'never'])
 const SCROLL_GUTTERS = new Set<ScrollGutterMode>(['timeline', 'scrollbar', 'hidden'])
-const STATUS_BAR_KEYS = Object.keys(DEFAULT_STATUS_BAR) as (keyof StatusBarConfig)[]
+
+/** Every status-bar member but the ordered list; `normalizeStatusBar` copies
+ *  these only when the value is a boolean. Derived from the defaults on
+ *  purpose: a boolean member added to `StatusBarConfig`/`DEFAULT_STATUS_BAR`
+ *  must not have to be repeated here, or `normalizeStatusBar` would silently
+ *  drop its configured value. */
+type BooleanStatusBarKey = Exclude<keyof StatusBarConfig, 'pluginFieldsOrder'>
+const STATUS_BAR_BOOLEAN_KEYS: readonly BooleanStatusBarKey[] = (
+  Object.keys(DEFAULT_STATUS_BAR) as (keyof StatusBarConfig)[]
+).filter((key): key is BooleanStatusBarKey => key !== 'pluginFieldsOrder')
+
+/** Parsed `statusBar.pluginFieldsOrder`. `invalid` is what the settings screen
+ *  refuses to save; the renderer treats it as `all`. */
+export type ParsedPluginFieldsOrder =
+  | { readonly mode: 'all' }
+  | { readonly mode: 'none' }
+  | { readonly mode: 'groups'; readonly groups: readonly (readonly string[])[] }
+  | { readonly mode: 'invalid'; readonly reason: 'groups' | 'token' | 'duplicate' | 'sentinel' }
+
+/** Strict parse of one `statusBar.pluginFieldsOrder` value:
+ *  - `*` — every plugin field (the default);
+ *  - `''` (or three empty groups) — none;
+ *  - otherwise exactly three `;`-separated groups of comma-separated keys, the
+ *    group index picking the slot and the group order the sequence.
+ *  Any other shape is `invalid`: the settings screen blocks the save, and the
+ *  renderer falls back to `all` so a hand-edited typo can only ever show MORE
+ *  than asked, never hide a plugin silently. */
+export function parsePluginFieldsOrder(value: string): ParsedPluginFieldsOrder {
+  const trimmed = value.trim()
+  if (trimmed === ALL_PLUGIN_FIELDS) return { mode: 'all' }
+  if (trimmed === '') return { mode: 'none' }
+  const parts = trimmed.split(';')
+  if (parts.length !== STATUS_FIELD_SLOTS.length) return { mode: 'invalid', reason: 'groups' }
+  // The sentinel is a whole-value form: `*;a;b` must not read as a key list.
+  if (parts.some(part => part.includes(ALL_PLUGIN_FIELDS))) return { mode: 'invalid', reason: 'sentinel' }
+  const seen = new Set<string>()
+  const groups: string[][] = []
+  for (const part of parts) {
+    const body = part.trim()
+    if (body === '') {
+      groups.push([])
+      continue
+    }
+    const group: string[] = []
+    for (const raw of body.split(',')) {
+      const key = raw.trim().toLowerCase()
+      // An empty token is a typing error (`a,,b`, `a,`), not a silent no-op.
+      if (key === '' || !PLUGIN_FIELD_KEY.test(key)) return { mode: 'invalid', reason: 'token' }
+      // A key in two groups would make "move it here" a silent no-op when the
+      // old position was not removed; refuse the write instead.
+      if (seen.has(key)) return { mode: 'invalid', reason: 'duplicate' }
+      seen.add(key)
+      group.push(key)
+    }
+    groups.push(group)
+  }
+  // `;;` is structurally fine and means the same as `''`.
+  return seen.size === 0 ? { mode: 'none' } : { mode: 'groups', groups }
+}
+
+/** Render parsed groups back to their canonical text (trimmed, lower-cased,
+ *  one separator between groups). */
+export function formatPluginFieldsOrder(groups: readonly (readonly string[])[]): string {
+  return groups.map(group => group.join(',')).join(';')
+}
+
+/** Normalize a settings/config-layer value: valid values land in canonical
+ *  form, an invalid string is kept (so the settings screen can show and fix
+ *  it), and anything that is not a string becomes the default `*`. */
+export function normalizePluginFieldsOrder(value: unknown): string {
+  if (typeof value !== 'string') return ALL_PLUGIN_FIELDS
+  const parsed = parsePluginFieldsOrder(value)
+  if (parsed.mode === 'invalid') return value.trim()
+  if (parsed.mode === 'all') return ALL_PLUGIN_FIELDS
+  if (parsed.mode === 'none') return ''
+  return formatPluginFieldsOrder(parsed.groups)
+}
+
+/** The structural minimum the footer renders from — keeps this module free of
+ *  a `dsh-adapter` type import. */
+export interface StatusFieldOrderEntry {
+  readonly key: string
+  readonly slot: StatusFieldSlot
+}
+
+const NO_ORDERED_FIELDS: readonly StatusFieldOrderEntry[] = Object.freeze([])
+
+/** Apply the user's list to the live field registry. `all` (and any invalid
+ *  value) returns the input array itself — the default mode allocates nothing;
+ *  `none` returns the shared empty array; `groups` returns new entries in list
+ *  order with the slot taken from the group index (the user's group overrides
+ *  the plugin-declared slot). Unknown keys are skipped. */
+export function applyPluginFieldsOrder<T extends StatusFieldOrderEntry>(
+  fields: readonly T[],
+  order: string,
+): readonly T[] {
+  const parsed = parsePluginFieldsOrder(order)
+  if (parsed.mode === 'all' || parsed.mode === 'invalid') return fields
+  if (parsed.mode === 'none') return NO_ORDERED_FIELDS as readonly T[]
+  const byKey = new Map(fields.map(field => [field.key, field] as const))
+  const ordered: T[] = []
+  parsed.groups.forEach((group, index) => {
+    const slot = STATUS_FIELD_SLOTS[index] as StatusFieldSlot
+    for (const key of group) {
+      const field = byKey.get(key)
+      if (field === undefined) continue
+      // One entry per key: the parser rejects duplicates, this only keeps a
+      // defensive double render impossible.
+      byKey.delete(key)
+      ordered.push({ ...field, slot } as T)
+    }
+  })
+  return ordered
+}
 
 /** Normalize untrusted/config-layer values without mutating the input. */
 export function normalizeToolBackground(value: unknown): ToolBackground {
@@ -60,9 +195,12 @@ export function normalizeStatusBar(value: unknown): StatusBarConfig {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return normalized
 
   const input = value as Record<string, unknown>
-  for (const key of STATUS_BAR_KEYS) {
+  for (const key of STATUS_BAR_BOOLEAN_KEYS) {
     if (typeof input[key] === 'boolean') normalized[key] = input[key]
   }
+  // The one non-boolean member: a hand-written invalid list stays verbatim so
+  // the settings screen can show it, and the renderer reads it as `all`.
+  normalized.pluginFieldsOrder = normalizePluginFieldsOrder(input.pluginFieldsOrder ?? DEFAULT_STATUS_BAR.pluginFieldsOrder)
   return normalized
 }
 
@@ -357,7 +495,33 @@ export const applyImageBacking = imageBackingStore.apply
 /** Panel id grammar (plugins register under a `plugin:sub` namespace). */
 export const SIDE_PANEL_ID_PATTERN = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/
 
+/** Anonymous activations have no durable identity. Three segments cannot
+ * collide with a verified Component's two-segment panel address. */
+export function isTemporarySidePanelId(id: string): boolean {
+  return /^session:act[0-9]+:[a-z][a-z0-9_-]*$/u.test(id)
+}
+
+/** Old anonymous addresses cannot be attributed to a past activation. */
+export function isLegacyAnonymousSidePanelId(id: string): boolean {
+  return /^act[0-9]+:[a-z][a-z0-9_-]*$/u.test(id)
+}
+
+/** Encode only verified registered Component ids when writing preferences.
+ * Runtime addresses remain unchanged; bare actN CSV entries stay unclaimed. */
+export function persistentSidePanelId(id: string): string {
+  return isLegacyAnonymousSidePanelId(id) ? 'component:' + id : id
+}
+
+/** Every built-in panel's id in the order the default lays them out. This is
+ *  the ordering skeleton of `ALL_SIDE_PANELS`, not a snapshot of what is
+ *  enabled: the resolver drops the ids that are not registered. */
 export const DEFAULT_SIDE_PANEL_IDS = 'todo,jobs,agents,info,trajectory,workspace,btw,companion'
+
+/** `sidePanel.panels`'s "show everything" token — the default. Under it the
+ *  enabled set follows the registry: plugin panels registered later appear
+ *  (and unregistered ones leave) without any settings write, and the picker
+ *  reads the same value as "all checked". */
+export const ALL_SIDE_PANELS = '*'
 
 function normalizeBoolean(value: unknown, fallback: boolean): boolean {
   return typeof value === 'boolean' ? value : fallback
@@ -370,22 +534,157 @@ export function normalizeSidePanelRatio(value: unknown): number {
   return Math.min(0.95, Math.max(0.1, value))
 }
 
-/** Comma-separated enabled-panel ids: tokens that fail the id grammar are
- *  dropped (a typo must never wedge the layout); unknown-but-well-formed
- *  ids survive — a plugin may register them later in the session. */
-export function normalizeSidePanelPanels(value: unknown): string {
-  if (typeof value !== 'string') return DEFAULT_SIDE_PANEL_IDS
-  const seen = new Set<string>()
-  for (const token of value.split(',')) {
-    const id = token.trim().toLowerCase()
-    if (id !== '' && SIDE_PANEL_ID_PATTERN.test(id)) seen.add(id)
+/** Parsed `sidePanel.panels`. `*` is "every registered panel"; `''` is the
+ *  settings screen's clear (use the default); otherwise the exact ids, in
+ *  PanelBar order. `invalid` is what every write path refuses: the settings
+ *  gate rejects the draft, and `normalizeSidePanelPanels` (the store, and the
+ *  settings field's `format`) drops the unusable tokens. `resolveSidePanelIds`
+ *  still folds a raw invalid value to `all` for a caller handing it
+ *  un-normalized text — the PanelBar and the settings screen never do. */
+export type ParsedSidePanelPanels =
+  | { readonly mode: 'all' }
+  | { readonly mode: 'empty' }
+  | { readonly mode: 'list'; readonly ids: readonly string[] }
+  | { readonly mode: 'invalid'; readonly reason: 'sentinel' | 'token' | 'temporary' | 'empty' }
+
+/** Strict parse of one `sidePanel.panels` value (the settings save gate). */
+export function parseSidePanelPanels(value: string): ParsedSidePanelPanels {
+  const trimmed = value.trim()
+  if (trimmed === ALL_SIDE_PANELS) return { mode: 'all' }
+  if (trimmed === '') return { mode: 'empty' }
+  // The sentinel is a whole-value form: `*,todo` must not read as an id list.
+  if (trimmed.split(',').some(token => token.trim() === ALL_SIDE_PANELS)) {
+    return { mode: 'invalid', reason: 'sentinel' }
   }
-  return seen.size > 0 ? [...seen].join(',') : DEFAULT_SIDE_PANEL_IDS
+  const ids: string[] = []
+  const seen = new Set<string>()
+  for (const raw of trimmed.split(',')) {
+    const id = raw.trim().toLowerCase()
+    // Tolerate `a,,b` / a trailing comma: the old gate did, and the store
+    // canonicalizes the same way.
+    if (id === '') continue
+    // A temporary address passes the grammar but has no durable identity, so
+    // saving one would persist a name no later run can honour (issue #1695).
+    if (SIDE_PANEL_ID_PATTERN.test(id) && isTemporarySidePanelId(id)) {
+      return { mode: 'invalid', reason: 'temporary' }
+    }
+    if (!SIDE_PANEL_ID_PATTERN.test(id)) return { mode: 'invalid', reason: 'token' }
+    if (seen.has(id)) continue
+    seen.add(id)
+    ids.push(id)
+  }
+  // `,` names nothing: refuse the write instead of folding it into a clear
+  // (which would silently re-enable the default set).
+  return ids.length > 0 ? { mode: 'list', ids } : { mode: 'invalid', reason: 'empty' }
 }
 
-/** Enabled panel ids in PanelBar order. */
-export function parseSidePanelIds(value: string): readonly string[] {
-  return normalizeSidePanelPanels(value).split(',')
+/** Tolerant normalization for the config/store entry points: `*`, a
+ *  non-string, a blank or an all-malformed value fold to `*`; otherwise
+ *  tokens are lower-cased, de-duped and order-preserved. Unlike the picker's
+ *  strict gate, a malformed token is dropped here — a typo must never wedge
+ *  the layout — while unknown-but-well-formed ids survive, because a plugin
+ *  may register them later in the session. A temporary address is dropped
+ *  too: it is session state, and a stored value may never claim one. */
+export function normalizeSidePanelPanels(value: unknown): string {
+  if (typeof value !== 'string') return ALL_SIDE_PANELS
+  const trimmed = value.trim()
+  if (trimmed === ALL_SIDE_PANELS) return ALL_SIDE_PANELS
+  const seen = new Set<string>()
+  for (const token of trimmed.split(',')) {
+    const id = token.trim().toLowerCase()
+    if (id === '' || id === ALL_SIDE_PANELS) continue
+    if (!SIDE_PANEL_ID_PATTERN.test(id) || isTemporarySidePanelId(id)) continue
+    seen.add(id)
+  }
+  return seen.size > 0 ? [...seen].join(',') : ALL_SIDE_PANELS
+}
+
+/** Which temporary panels this run is hiding.
+ *
+ *  A temporary panel (`session:actN:…`) has no durable identity, so its
+ *  checkbox cannot write the stored value — and the stored value cannot name
+ *  it either. Its on/off is session state instead: hiding one moves this set,
+ *  which every apply leaves alone, so replaying `sidePanel.panels` (boot, a
+ *  settings save, a live watch snapshot) never revives or buries one. */
+let hiddenTemporarySidePanelIds: readonly string[] = Object.freeze([])
+const hiddenTemporarySidePanelListeners = new Set<() => void>()
+
+export function getHiddenTemporarySidePanels(): readonly string[] {
+  return hiddenTemporarySidePanelIds
+}
+
+export function subscribeHiddenTemporarySidePanels(listener: () => void): () => void {
+  hiddenTemporarySidePanelListeners.add(listener)
+  return () => void hiddenTemporarySidePanelListeners.delete(listener)
+}
+
+/** Hide or restore one temporary panel for this run (`hidden` true = off the
+ *  bar, i.e. its checkbox is clear). Returns whether anything changed. */
+export function setTemporarySidePanelHidden(id: string, hidden: boolean): boolean {
+  const present = hiddenTemporarySidePanelIds.includes(id)
+  if (present === hidden) return false
+  hiddenTemporarySidePanelIds = Object.freeze(
+    hidden ? [...hiddenTemporarySidePanelIds, id] : hiddenTemporarySidePanelIds.filter(candidate => candidate !== id),
+  )
+  for (const listener of hiddenTemporarySidePanelListeners) listener()
+  return true
+}
+
+/** Map one persisted id back to the runtime id it names. A `component:`-encoded
+ *  address resolves only for a registered legacy-anonymous panel: the encoding
+ *  exists so that a bare `actN:x` left over in an old value stays an unclaimed
+ *  placeholder instead of being attributed to this run's activation. */
+function runtimeSidePanelId(id: string, registered: ReadonlySet<string>): string {
+  const prefix = 'component:'
+  if (!id.startsWith(prefix)) return id
+  const runtimeId = id.slice(prefix.length)
+  return isLegacyAnonymousSidePanelId(runtimeId) && registered.has(runtimeId) ? runtimeId : id
+}
+
+/** The one derivation of "which panels are enabled", given the stored value
+ *  and the live registry (ids in registry order).
+ *
+ *  - `*` (and a raw invalid value): the built-ins in their default order,
+ *    then every other registered panel in registry order — the same
+ *    tail order the old registration-time append produced, so an upgrade
+ *    changes no visible tab order.
+ *  - an explicit list: its ids, in its order — a `component:`-encoded one
+ *    decoded to the panel it names, an id nothing claims yet left as is (it
+ *    stays a placeholder until a plugin registers it). A bare `actN:x` is
+ *    never honoured: an old anonymous address cannot be attributed to this
+ *    run's activation (#1695), so it enables nothing even when a panel
+ *    happens to answer to that runtime id. Registered temporary panels join
+ *    at the tail unless `hiddenTemporary` names them: a stored value cannot
+ *    speak for a panel it cannot name. */
+export function resolveSidePanelIds(
+  configured: string | undefined,
+  registered: readonly string[],
+  hiddenTemporary: readonly string[] = [],
+): readonly string[] {
+  const parsed = parseSidePanelPanels(configured ?? ALL_SIDE_PANELS)
+  if (parsed.mode === 'list') {
+    const claimed = new Set(registered)
+    const ids = parsed.ids
+      .filter(id => !isLegacyAnonymousSidePanelId(id))
+      .map(id => runtimeSidePanelId(id, claimed))
+    for (const id of registered) {
+      if (!isTemporarySidePanelId(id) || hiddenTemporary.includes(id) || ids.includes(id)) continue
+      ids.push(id)
+    }
+    return ids
+  }
+  const remaining = new Set(registered)
+  const ids: string[] = []
+  for (const id of DEFAULT_SIDE_PANEL_IDS.split(',')) {
+    if (!remaining.delete(id)) continue
+    ids.push(id)
+  }
+  for (const id of registered) {
+    if (!remaining.delete(id)) continue
+    if (hiddenTemporary.includes(id)) continue
+    ids.push(id)
+  }
+  return ids
 }
 
 const sidePanelSplitEnabledStore = createLiveSetting<boolean>(true, value => normalizeBoolean(value, true))
@@ -403,7 +702,7 @@ export const subscribeSidePanelRatio = sidePanelRatioStore.subscribe
 export const getSidePanelRatio = sidePanelRatioStore.get
 export const applySidePanelRatio = sidePanelRatioStore.apply
 
-const sidePanelPanelsStore = createLiveSetting<string>(DEFAULT_SIDE_PANEL_IDS, normalizeSidePanelPanels)
+const sidePanelPanelsStore = createLiveSetting<string>(ALL_SIDE_PANELS, normalizeSidePanelPanels)
 export const subscribeSidePanelPanels = sidePanelPanelsStore.subscribe
 export const getSidePanelPanels = sidePanelPanelsStore.get
 export const applySidePanelPanels = sidePanelPanelsStore.apply

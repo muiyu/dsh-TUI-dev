@@ -42,6 +42,7 @@ import { availableParallelism, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const GATES = [
+  'verify:cli',
   'verify:boundary',
   'verify:agent-domain',
   'verify:contract',
@@ -54,6 +55,8 @@ const GATES = [
   'verify:web-coexistence',
   'verify:plugin-spec',
   'verify:plugin-grants',
+  'verify:plugin-grant-write',
+  'verify:plugin-grant-lifecycle',
   'verify:plugin-storage',
   'verify:plugin-messages',
   'verify:plugin-ledger',
@@ -62,6 +65,7 @@ const GATES = [
   'verify:plugin-feed',
   'verify:plugin-guard',
   'verify:plugin-lifecycle',
+  'verify:root-guard-events',
   'verify:runtime-themes',
   'verify:theme-hotswap',
   'verify:theme-preview',
@@ -136,6 +140,9 @@ const GATES = [
   'verify:preset-patch',
   'verify:session-mounts',
   'verify:handoff-stdin',
+  'verify:status-fields',
+  'verify:plugin-field-order',
+  'verify:plugin-field-picker',
 ]
 
 // The longest gates start first so none of them is left running alone at the

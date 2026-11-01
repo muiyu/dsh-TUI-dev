@@ -16,6 +16,7 @@
  */
 
 import { stringWidth } from '../ink/stringWidth.js'
+import { getGraphemeSegmenter } from '../utils/intl.js'
 
 /** Sanitize an already-string value for the render path. */
 export function cleanRenderText(value: string, maxCells: number): string {
@@ -43,6 +44,35 @@ export function cleanRenderText(value: string, maxCells: number): string {
  */
 export function cleanBlockLines(value: string, maxCells: number): string[] {
   return value.split(/\r?\n/u).map(line => cleanRenderText(line, maxCells)).filter(line => line !== '')
+}
+
+/** Bounded, local-only registry output. Explicit command blocks keep the
+ * existing cleanBlockLines contract; reports retain indentation and empty rows. */
+export function cleanCommandReport(value: string): { lines: string[]; truncated: boolean } {
+  const maxCodeUnits = 65_536
+  const maxLines = 200
+  const maxCells = 4000
+  let bounded = value.slice(0, maxCodeUnits)
+  // Do not split a Unicode scalar at the allocation boundary.
+  if (bounded.length < value.length && /[\uD800-\uDBFF]$/u.test(bounded)) bounded = bounded.slice(0, -1)
+  let truncated = bounded.length < value.length
+  const rows = bounded.split(/\r?\n/u)
+  if (rows.length > maxLines) truncated = true
+  const lines = rows.slice(0, maxLines).map(row => {
+    const plain = flattenPasteInline(row)
+    if (stringWidth(plain) <= maxCells) return plain
+    truncated = true
+    let clipped = ''
+    let cells = 0
+    for (const { segment } of getGraphemeSegmenter().segment(plain)) {
+      const width = stringWidth(segment)
+      if (cells + width > maxCells - 1) break
+      clipped += segment
+      cells += width
+    }
+    return `${clipped}…`
+  })
+  return { lines: value === '' ? [] : lines, truncated }
 }
 
 /**
@@ -92,6 +122,29 @@ export function flattenPasteInline(value: string): string {
     .replace(/\u001B\][^\u0007]*(?:\u0007|\u001B\\)/gu, '')
     .replace(/\u001B\[[0-?]*[ -/]*[@-~]/gu, '')
   return flattenInline(withoutAnsi)
+}
+
+/** Bidi overrides/isolates and invisible separators: invisible, and a single
+ *  U+202E next to a host field (`#sessionId`, cwd) can flip the displayed
+ *  direction of the text that follows it. Footer fields sit immediately
+ *  beside those provenance tags, so they strip this class first.
+ *
+ *  The joiners U+200C (ZWNJ) and U+200D (ZWJ) are deliberately NOT in it:
+ *  they are orthographic (Persian, Indic) and compose emoji sequences, so
+ *  stripping them would rewrite the plugin's text and inflate its cell
+ *  width (a ZWJ family emoji measures 2 cells, 6 without the joiners). */
+const BIDI_AND_INVISIBLE_MARKS = /[\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/gu
+
+/**
+ * Footer-field ingress: the common render cleanup PLUS bidi controls and
+ * invisible separators. Kept separate from {@link cleanRenderText} so the
+ * existing managed-UI callers keep their exact behaviour. Non-scalars yield
+ * '' (the caller decides between refuse and clear); scalars coerce then
+ * sanitize.
+ */
+export function cleanStatusFieldText(value: unknown, maxCells: number): string {
+  if (typeof value !== 'string' && typeof value !== 'number' && typeof value !== 'boolean') return ''
+  return cleanRenderText(String(value).replace(BIDI_AND_INVISIBLE_MARKS, ''), maxCells)
 }
 
 /** Toast-bound plugin text (veto reasons, handled notices, rewind summaries)

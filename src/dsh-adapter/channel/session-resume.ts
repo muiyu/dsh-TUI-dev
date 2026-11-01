@@ -79,7 +79,7 @@ export function createSessionResumeActions(
   },
   deps: {
     owner: Pick<ChannelOwner, 'current'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'adopt' | 'waitForDisposal'>
+    binding: Pick<Binding, 'agent' | 'session' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'adopt' | 'waitForDisposal'>
     /**
      * Adopt an agent this process already has live. `/resume` uses it so a
      * target that is already running here is re-attached in place (parking the
@@ -197,6 +197,12 @@ export function createSessionResumeActions(
           ...(composed.setup === undefined ? {} : { setup: composed.setup }),
         })))
       } catch (error) {
+        // 请核: the supported host's writer-lock error.name is SessionAlreadyOwnedError.
+        if (error !== null && typeof error === 'object' && 'name' in error && error.name === 'SessionAlreadyOwnedError') {
+          const message = t('resume-owned-elsewhere')
+          deps.notify(message, { color: 'warning', timeoutMs: 8000 })
+          return { ok: false, reason: 'failed', error: message, code: 'owned-elsewhere' }
+        }
         const message = error instanceof Error ? error.message : String(error)
         deps.notify(t('resume-failed', { err: message }), { color: 'error', timeoutMs: 8000 })
         return { ok: false, reason: 'failed', error: message }
@@ -221,7 +227,12 @@ export function createSessionResumeActions(
       // normal return is a commit, which is what the outer finally keys on.
       const result = deps.binding.adopt<ResumeResult>(candidate, adoption, (committedBinding, disposePrevious) => {
         const previousSessionId = String(committedBinding.agent.session.id)
-        const keepPrevious = keepCurrent && committedBinding.handle !== undefined
+        // Reopening the screen's own ended session (#1651) is not a switch:
+        // the handle it replaces is the disposed one, and parking it would put
+        // a dead entry in the background ledger under the id this adoption now
+        // owns — the live-adoption lookup prefers that entry over the screen's
+        // current handle. Dispose it instead (idempotent).
+        const keepPrevious = keepCurrent && previousSessionId !== sessionId && committedBinding.handle !== undefined
           && (committedBinding.handle.agent.status === 'running' || agentViewHasTurns(snapshotLiveSessionEvents(committedBinding.handle.agent.session)))
         if (keepCurrent && (committedBinding.handle === undefined || keepPrevious)) deps.parkSubagents(committedBinding.agent)
         state.cwd = handle.agent.session.header.cwd ?? state.cwd
@@ -259,8 +270,8 @@ export function createSessionResumeActions(
    * Reserve `sessionId` for a disk resume on THIS terminal.
    *
    * Returning a reservation means the caller owns the session in the ledger
-   * until it calls `finish()`. That covers the whole attempt, not just the
-   * `agents.resume` call: the awaits in between (veto, compaction, preset and
+   * until it calls `settle()` or `abandon()`. That covers the whole attempt,
+   * not just `agents.resume`: the awaits in between (veto, compaction, preset and
    * route reads) are exactly the window a publisher beat — or a peer — could
    * otherwise slip into.
    * @param sessionId - Session about to be resumed from disk.
@@ -373,8 +384,10 @@ export function createSessionResumeActions(
     // default disposition disposes the handle that IS running, so a second
     // Enter on the `current` row stopped the live turn while reporting success.
     // `attachToAgent()` has always short-circuited here; this is the same rule
-    // for the unified screen's `/resume` path.
-    if (String(sessionId) === String(entrySession.id)) return { ok: true }
+    // for the unified screen's `/resume` path. A disposed foreground (its
+    // agent unloaded under the screen, #1651) has nothing running: resuming
+    // its own id reopens the log like any other disk resume.
+    if (String(sessionId) === String(entrySession.id) && deps.binding.session.status !== 'disposed') return { ok: true }
     // Switching away starts disposal without blocking the synchronous commit.
     // Do not adopt that closing Agent (or reopen its still-held JSONL writer).
     await deps.binding.waitForDisposal(sessionId)
@@ -389,39 +402,45 @@ export function createSessionResumeActions(
       if (!reserved.ok) return reserved.result
       reservation = reserved.reservation
     }
-    if (await deps.sessionSwitchVetoed('resume', sessionId)) {
+    try {
+      if (await deps.sessionSwitchVetoed('resume', sessionId)) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // Settle the transaction of the session being LEFT — the foreground
+      // binding, not the target. With one transaction per live agent this is
+      // exactly the two behaviors the switch needs: returning to a session that
+      // is compacting in the background leaves the fresh foreground (which owns
+      // nothing) untouched, so the compaction survives; navigating to a
+      // DIFFERENT session still settles the one left behind, so a compaction
+      // never keeps running invisibly after a plain switch.
+      await deps.settleCompaction()
+      if (!deps.binding.isCurrent(adoption) || deps.binding.agent.session !== entrySession) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // The target was read BEFORE those awaits. Re-read it in BOTH directions:
+      // the registry can have replaced or dropped that agent while we yielded
+      // (adopting the captured object would hand the screen a session nothing
+      // owns any more), and it can also have GROWN one — a peer action mounting
+      // this very session here means the disk path below would resume a log this
+      // process is already driving. `agent-view-projection.attach` has always made
+      // the first check.
+      const liveNow = agents.get?.(SessionId(sessionId))
+      if (liveNow !== live) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // A live target is adopted in place — the same path `/agentview` uses, so
+      // the session being left is parked rather than disposed of. Only a target
+      // with no live agent here goes back to the persistence backend.
+      if (live !== undefined) return deps.adoptLive(live)
+      // The inner transaction now owns cleanup through open/adopt/commit.
+      // Until this handoff, every exit (including a throwing veto or recheck)
+      // gives the reservation back without waiting for a publisher beat.
+      const transferred = reservation
+      reservation = undefined
+      return resume(sessionId, 'agent-view', true, adoption, entrySession, transferred)
+    } finally {
       reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
     }
-    // Settle the transaction of the session being LEFT — the foreground
-    // binding, not the target. With one transaction per live agent this is
-    // exactly the two behaviors the switch needs: returning to a session that
-    // is compacting in the background leaves the fresh foreground (which owns
-    // nothing) untouched, so the compaction survives; navigating to a
-    // DIFFERENT session still settles the one left behind, so a compaction
-    // never keeps running invisibly after a plain switch.
-    await deps.settleCompaction()
-    if (!deps.binding.isCurrent(adoption) || deps.binding.agent.session !== entrySession) {
-      reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
-    }
-    // The target was read BEFORE those awaits. Re-read it in BOTH directions:
-    // the registry can have replaced or dropped that agent while we yielded
-    // (adopting the captured object would hand the screen a session nothing
-    // owns any more), and it can also have GROWN one — a peer action mounting
-    // this very session here means the disk path below would resume a log this
-    // process is already driving. `agent-view-projection.attach` has always made
-    // the first check.
-    const liveNow = agents.get?.(SessionId(sessionId))
-    if (liveNow !== live) {
-      reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
-    }
-    // A live target is adopted in place — the same path `/agentview` uses, so
-    // the session being left is parked rather than disposed of. Only a target
-    // with no live agent here goes back to the persistence backend.
-    if (live !== undefined) return deps.adoptLive(live)
-    return resume(sessionId, 'agent-view', true, adoption, entrySession, reservation)
   }
 
   /**

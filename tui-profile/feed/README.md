@@ -18,7 +18,7 @@
 {
   "feedVersion": 1,
   "entries": [
-    { "name": "@deepseek-harness-tui/dsh-tui", "scope": "@deepseek-harness-tui", "version": "0.16.1" }
+    { "name": "@deepseek-harness-tui/dsh-tui", "scope": "@deepseek-harness-tui", "version": "0.18.0" }
   ]
 }
 ```
@@ -47,13 +47,22 @@
 
 `FirstPartyVerdict` 的 `first-party` 分支带一个 `corroboration: 'unavailable'` 字段。
 本轮**没有任何在线校验**：宿主服务（`@deepseek-ai/dsh-plugin-manager`）的公开类型面
-不含 provenance / publisher / attestation 任何一项，TUI 也没有网络客户端。
+不含 provenance / publisher / attestation 任何一项，TUI 也没有网络客户端。判定只读
+清单与 spec，不做任何网络访问。
 
-约定（roadmap §6 第 14 条 ②）：
+语义（与[准入指南](../docs/plugin-admission-and-development.md)「供应链证据与
+provenance」、[governance §5](../governance/rules.md) 同一口径）：
 
-- provenance **不得单独放行**——它不能替代清单条目；
-- 一旦将来某个来源能给出发布者身份，且与清单条目**不一致**，必须把该次判定
-  **降级为 `third-party`**（一票否决），而不是清除这个字段。
+- **只否决不单独放行**：provenance **不得**替代清单条目，也不得替代用户确认——它只能
+  用来*推翻*一次已经给出的判定。"嫡系"仍然只由这份清单的精确 `name@version` 决定。
+- **不一致 ⇒ 降级**：将来某个来源能给出发布者身份或构建 provenance，且与清单条目
+  **不一致**，必须把该次判定**降级为 `third-party`**（一票否决），而不是清除这个字段、
+  也不是静默忽略。
+- **缺席 ≠ 失败**：拿不到 attestation 只是"没有这一档 evidence"，不改变判定、不产生告警
+  ——除非某次判定明确要求了 `attested`（今天没有这样的判定）。
+- **将来接的来源**：npm registry 的 attestation 是缝可接的实证（生态侧已有包带
+  `slsa.dev/provenance/v1`），但它只说明"这个 tarball 由哪个 builder 在哪次构建里产出"，
+  不说明代码安全或作者可信；接入时**只加否决**，不引入"官方认证"口径。
 
 ## 怎么加一条
 

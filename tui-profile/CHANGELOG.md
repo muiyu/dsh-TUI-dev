@@ -5,6 +5,125 @@
 口径见 [`governance/rules.md`](governance/rules.md)），因此没有单独的审批或晋级流程，
 登记的是 profile 的变化而不是 dsh-TUI 产品的全部变更。
 
+**登记义务**：新增/废弃坐标，或重钉任一 contract profile 的 `profileHash`（哪怕只改措辞），
+都必须在最新条目里写出**坐标与原因**——这是"历史坐标的语义变更怎么被发现"的唯一人工记录
+（digest 只回答哪个坐标变了，不回答哪一条变了；见 governance §2/§4）。
+
+## 2026-10-20（侧栏 Panel 新增渲染面：Markdown / CodeBlock）
+
+### Added（实验性，不在冻结范围）
+
+- 插件面板的 kit（`TuiPanelProps.ui`）增两个成员：`ui.Markdown`（收一段
+  markdown 正文）与 `ui.CodeBlock`（收原始代码 + 可选语言标签；围栏长度、
+  语言标签清洗与语法高亮由宿主负责，正文里出现三反引号也不会跑出围栏）。两者都是
+  **新定义的收窄包装**（`components/sidePanel/panelMarkdown.tsx`），只承诺
+  字符串入参：插件拿不到 marked 的 token、`CliHighlight` 句柄或 `ref`，
+  `Assert` 类型守卫把这条钉成编译错误。`TuiPanelMarkdownProps` /
+  `TuiPanelCodeBlockProps` 进 `./panels` 与 `./api`；`TuiPanelUi` /
+  `TuiPanelEvent` / `TuiPanelSummary` 此前只在 `./panels`，`./api` 这次一并
+  补齐。`apiVersion` 与 descriptor 形状均不变。
+  面板仍是实验面：首帧无语法高亮、面板不可选择/复制、块级公式跟随用户的
+  `mathRendering`；`ui.Markdown` 沿用聊天口径（先剥 prompt-analysis 标签块），
+  `ui.CodeBlock` 不剥这层（原始代码逐行保留）。限制与记忆化口径写在
+  `docs/plugins.md` 的侧栏 Panel 段。
+
+## 2026-10-19（接缝十一：底栏插件字段）
+
+### Added
+
+- `ctx.tuiStatus.setField(key, text, options?, identity?)`：接缝十一的**加法**——把
+  一段键控纯文本并进底栏既有的左右组（`left-tail` / `right-head` / `right-tail`
+  三个插入槽），不新增行、不新增分组、不新增服务、不新增能力位。选项含
+  `slot` / `tone`（主题语义色）/ `maxCells`（≤32）/ `minColumns` / `detail`
+  （hover 补充行）/ `onClick`（全屏鼠标，且必须同时声明 `detail`）。准入沿用
+  `set()` 的 caller/activation 归属、token disposer、effect-ledger 记录（新
+  resource kind `status-field`），并加全局 ≤6、单 activation ≤2 的段数上限；
+  所有拒绝路径告警不抛错。插件可用 `statusBar.pluginFields`（`/settings` 或
+  `cordis.yml`）一键关闭渲染，关闭不卸载插件。导出面只增不删：
+  `TuiStatusFieldOptions` / `TuiStatusFieldSlot` / `TuiStatusFieldTone` 进
+  `./extensions` 与 `./api`；宿主侧 `TuiStatusFieldEntry` 不导出。
+
+### Documented
+
+- 准入指南接缝十一新增「底栏字段（`setField`）」小节（契约、规则表、示例、
+  hover/点击的 mouse-only 说明、稳定性归属）；接缝总览与生态速览同步标注。
+
+## 2026-10-18（D-4：生态治理三件收口）
+
+### Changed
+
+- `tui-profile/package.json` **删掉 `version` 字段**（原 `0.1.0-experimental`）：profile
+  没有自己的版本号。它随 dsh-TUI 的包发布（`files` 只发 `feed` / `registry` / `protocols` /
+  `schemas`，这份 package.json 不进 tarball），身份是 `registry/registry-0.15.json` 的
+  `profileHash` 钉与本仓库提交；版本线只属于根 `package.json`。原值既不与根包对齐、也没有
+  任何消费者，留着只会诱导读者把它当 semver。`verify:plugin-spec` 新增一条检查钉住
+  「不自称版本」（69 → 72 checks，另两条见下）。
+
+### Fixed
+
+- 参考实现 `conformance/tests/admission-core.js` 的坐标索引扩到 `extensions`：此前只用
+  `imports + definitions`，于是 `requires.contracts` 里的扩展坐标（如
+  `tui.dsh/v1alpha1#Backend`）在 profile 侧被当成"不在准入范围"抛错，而生产侧
+  `registryEntries()` 自 W-2 起一并读 `extensions`——同一个清单在两边结论相反。现在两边
+  同源：把索引抽成不依赖 `@dsh-std` 的 `conformance/tests/profile-index.js`，镜像门直接把它与
+  宿主 `registryEntries()` 逐坐标比对（缺失/多余都红）；新 fixture
+  `valid-extension-coordinate-plugin.json`（`requires` 引用 `tui.dsh/v1alpha1#Backend`）在
+  套件与镜像门各过一遍。套件 46 → **47 例**，镜像门 69 → **72** 条。
+- `notes/0009` 里两处过期口径随本节订正（缺口 1 的"根包 0.14.0"括注、缺口 6 的"未关闭"）。
+- `src/dsh-adapter/backend-admission.ts` 与 `src/dsh-adapter/index.ts` 的陈旧注释：两处仍写
+  "装配点是 stage C 装链路的事"，而 D-1 已把装配落在 `backend-assembly.ts`（注释级改动，
+  不改任何导出面与行为）。
+
+### Documented
+
+- 准入指南新增 `TUI-RUN-002`（信任档位必须在装/启用之前可见：进程内全信任、无沙箱、
+  不自动更新；命中首方 feed 也不豁免确认）与 `TUI-OBS-002`（`disable` / `remove` / `purge`
+  是三种效果，宿主不得把"包已移除"写成"资源已清空"；今天**没有** purge，残留只报告一次）
+  两条正文——它们此前只以 `[ ]` 出现在检查清单里、没有正文。
+- [`governance/rules.md`](governance/rules.md) §2 增加"坐标变更必须登记"的硬口径，§3 写明
+  profile 不自称版本，§4 写明历史坐标语义比较的**粒度边界**（每个 contract profile 一枚
+  digest，能答"哪个坐标变了"、答不了"哪一条变了"，因此不做语义 diff 工具）与由此决定的
+  发现路径。
+
+## 2026-10-18（D-3：生态准入成文与对齐）
+
+### Documented（不改坐标，无破坏性变更）
+
+- [准入与开发指南](docs/plugin-admission-and-development.md)在 `TUI-DEP-001` 之后新增两节：
+  「供应链证据与 provenance（执行口径）」把 evidence 拆成 `declared` / `parsed` /
+  `negotiated` / `tested` / `observed` / `attested` 六档，逐档写明**谁产出、能证明什么、
+  不能证明什么**，并写清 artifact digest 的口径（对象是会被安装的 tarball，不是仓库或
+  commit）、依赖闭包的范围（产物 / 锁文件 / native-build / override-patch / std revision）、
+  provenance 的**否决语义**（不得单独放行、不一致即降级、缺席不等于失败、本轮无在线校验）、
+  三个执行点（本仓库门禁 / 人工准入评审 / 运行时都不验）与措辞红线；新 `TUI-CLAIM-001`
+  正文规定 claim 必须绑定 std revision、profile、Host、artifact、suite、result，并给出它们与
+  已发布的 [`schemas/conformance-claim.schema.json`](schemas/conformance-claim.schema.json)
+  必填键的对应关系，以及"一条 claim 只有一档 evidence"「没有 artifact digest 就没有
+  claim」「作者与参考实现不能自证」「claim 随证据失效」四条硬口径。
+- 同文件「命名与发布规范」改写为**双轨**：裸名与 scoped 都是一等公民、不因命名被拒（bundle
+  的 patch 按包名解析，裸名形态最稳），组织内新包仍建议 `@dsh-tui-ecosystem/<name>`，官方
+  核心包保持 `@deepseek-harness-tui/*`；**feed 只收 scoped** 单列成一条（嫡系资格 ≠ 生态
+  准入），并补名称稳定性、仓库归属、许可证、`v*` tag == version、provenance 的发布口径。
+- 同文件新增「从旧模板迁移」：只有 `cordis.patch.yml`、没有 `dsh-plugin.json` 的包**没有
+  声明面**——不参与准入、不能声明 `Backend`、不发布坐标，**不是"默认通过"**；给出六步迁移
+  清单（补 manifest / 保留 patch / 指向 `tui.dsh/v1alpha1` / manifest 进发布面 / 本地验证 /
+  发布流程）并与 `TUI-PKG-001` / `TUI-PKG-002` 逐条对应。
+- 同文件「收录与推广」改写为**三层关系表**（仓内 profile 准入 / 首方 feed / 生态收录），
+  如实写出生态收录流程实际校验的五条（JSON 形状、必填字段与 `kind`、repo 格式与去重、仓库
+  公开与提交者归属、README 回链），并点明它**不查** npm 发布、包名形态、manifest、provenance
+  与能力权限声明 ⇒ **收录 ≠ 准入 ≠ 背书**；G 节措辞红线原样保留。
+- [governance/rules.md](governance/rules.md) §5 Evidence 从一段话扩成六档表，写明谁能提供
+  证据、能证明什么、不能证明什么，并重申**不能自我认证、不能单独放行、任何 evidence 都不是
+  安全保证**——只是把既有语义写全，不新增义务。
+- [feed/README.md](feed/README.md) 的「provenance（一票否决的缝）」与准入指南对齐：只否决
+  不放行、不一致即降级、缺席不等于失败、将来只接否决不引入"官方认证"，并去掉对仓外 roadmap
+  条目的引用。
+- [用户文档](https://github.com/ccch1mneyyy/dsh-TUI/blob/main/docs/plugins.md)（中英两版）的
+  provenance 已知缺口改为指向准入指南的新节。
+
+本轮只改文档：协议正文、`registry/`、contract profile、fixture 与 `profileHash` 均未变，没有
+新增门禁或 fixture。
+
 ## 2026-10-17（D-2：安装执行器的取值语义成文）
 
 ### Documented（不改坐标，无破坏性变更）

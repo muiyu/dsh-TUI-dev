@@ -5,7 +5,10 @@
  * sanitizes and joins every text contribution into one line. `registerView`
  * is the bounded rich companion for compact, pointer-only surfaces that need
  * host React and themed cells (for example a progress card). It deliberately
- * receives no input, channel, or raw-terminal capability.
+ * receives no input, channel, or raw-terminal capability. `setField` is the
+ * footer sibling: one keyed text cell admitted into the prompt footer's
+ * existing left/right groups, with the same lifecycle, ownership, token, and
+ * ledger rules as `set()`.
  *
  * Same split as the dialogs seam: a cordis-free store the chat screen
  * subscribes to, and a thin cordis service validating untrusted input.
@@ -13,7 +16,7 @@
 
 import type React from 'react'
 import { Context, Service } from '@deepseek-ai/cordis'
-import { cleanScalarText } from './sanitize.js'
+import { cleanScalarText, cleanStatusFieldText } from './sanitize.js'
 import { activationFiber, assertCallerContext, bindCallerEffect, compositionRoot, concreteService, requirePluginCaller } from './host-access.js'
 import { componentIdentityOf } from './component-identity.js'
 import {
@@ -123,6 +126,59 @@ export interface TuiStatusViewEntry {
   readonly registrationId: number
 }
 
+/** Where a plugin footer field joins the footer: the left group's tail, the
+ *  right group's head, or the right group's tail. `right-tail` is the row's
+ *  right edge in the split layout only: `statusBar.compact` (the default)
+ *  merges both groups into one left-aligned chain, where the slots order that
+ *  chain and the ctx chip / trailing free space stay to the field's right. */
+export type TuiStatusFieldSlot = 'left-tail' | 'right-head' | 'right-tail'
+
+/** Semantic theme tone for a footer field. Literal colours are refused so a
+ *  plugin cannot paint a one-off cell that ignores the active theme. */
+export type TuiStatusFieldTone = 'dim' | 'accent' | 'success' | 'warning' | 'error'
+
+/** Options for `tuiStatus.setField`. Every key is optional; on update an
+ *  omitted key keeps that field's previous value (a fresh key starts from the
+ *  defaults documented below). */
+export interface TuiStatusFieldOptions {
+  /** Default `'left-tail'`. */
+  readonly slot?: TuiStatusFieldSlot
+  /** Default `'dim'`. */
+  readonly tone?: TuiStatusFieldTone
+  /** Hard text cap in terminal cells: default 16, clamped to 1…32. */
+  readonly maxCells?: number
+  /** Hide the field below this terminal width: default 0, clamped to 0…400. */
+  readonly minColumns?: number
+  /** Supplemental-row text shown while the pointer rests on the field,
+   *  capped at 160 cells. Declaring `onClick` requires it. */
+  readonly detail?: string
+  /** Pointer click in fullscreen (mouse tracking) only. Declaring it without
+   *  a non-empty `detail` is refused: a clickable cell owes an explanation. */
+  readonly onClick?: () => void
+}
+
+/** Host-side normalized field. `onClick` is the host-WRAPPED handler (errors
+ *  are logged and reported to the UI); this type stays inside the adapter. */
+export interface TuiStatusFieldEntry {
+  readonly key: string
+  readonly text: string
+  readonly slot: TuiStatusFieldSlot
+  readonly tone: TuiStatusFieldTone
+  readonly maxCells: number
+  readonly minColumns: number
+  readonly detail?: string
+  readonly onClick?: () => void
+}
+
+/** Host-side admission record: the frozen entry, the token + owner a disposer
+ *  checks, and the unwrapped click so an options-less update can reuse it. */
+export interface TuiStatusFieldRecord {
+  readonly entry: TuiStatusFieldEntry
+  readonly token: number
+  readonly owner: object
+  readonly rawOnClick?: () => void
+}
+
 // Colon-separated segments are the documented namespacing convention
 // (`plugin:sub-item`); each segment stays a lowercase slug.
 const KEY_PATTERN = /^[a-z][a-z0-9_-]*(:[a-z][a-z0-9_-]*)*$/u
@@ -130,6 +186,16 @@ const TEXT_CELLS = 200
 const MAX_ENTRIES = 20
 const MAX_VIEW_ROWS = 3
 const MAX_VIEW_ROW_BUDGET = 6
+// Footer budget: six plugin cells total (the row is one terminal line), two
+// per activation so one plugin cannot own the whole footer.
+const MAX_FIELDS = 6
+const MAX_FIELDS_PER_OWNER = 2
+const FIELD_CELLS_DEFAULT = 16
+const FIELD_CELLS_MAX = 32
+const FIELD_DETAIL_CELLS = 160
+const FIELD_MIN_COLUMNS_MAX = 400
+const FIELD_SLOTS = new Set<TuiStatusFieldSlot>(['left-tail', 'right-head', 'right-tail'])
+const FIELD_TONES = new Set<TuiStatusFieldTone>(['dim', 'accent', 'success', 'warning', 'error'])
 const HOST_STATUS_OWNER = Object.freeze({ kind: 'host-status-owner' })
 
 /** Cordis-free text + view store. Render order is first-set/register order
@@ -142,10 +208,13 @@ export class TuiStatusStore {
   // same status text).
   private readonly entries = new Map<string, { text: string; token: number; owner: object }>()
   private readonly views = new Map<string, { view: TuiStatusViewEntry; token: number; owner: object }>()
+  private readonly fields = new Map<string, TuiStatusFieldRecord>()
   // useSyncExternalStore requires a referentially stable snapshot between
   // emits — a fresh array per call would re-render in an infinite loop.
   private snapshot: readonly TuiStatusEntry[] = []
   private viewSnapshot: readonly TuiStatusViewEntry[] = []
+  private fieldSnapshot: readonly TuiStatusFieldEntry[] = []
+  private onFieldError: ((key: string, error: Error) => void) | undefined
 
   constructor(
     private readonly onViewError?: (key: string, error: Error) => void,
@@ -213,6 +282,59 @@ export class TuiStatusStore {
     this.onViewError?.(key, error)
   }
 
+  /** Current footer fields, first-set first and referentially stable between
+   *  mutations for `useSyncExternalStore`. */
+  getFieldSnapshot(): readonly TuiStatusFieldEntry[] {
+    return this.fieldSnapshot
+  }
+
+  /** Store (or overwrite) one admitted field. Slot/option merging already
+   *  happened in the service; the store only records normalized entries. */
+  setField(entry: TuiStatusFieldEntry, token: number, owner: object, rawOnClick?: () => void): void {
+    this.fields.set(entry.key, { entry, token, owner, ...(rawOnClick === undefined ? {} : { rawOnClick }) })
+    this.fieldSnapshot = [...this.fields.values()].map(record => record.entry)
+    this.emit()
+  }
+
+  /** The full admission record for `key` (read by the service to merge an
+   *  update onto the previous options and to check ownership). */
+  fieldEntry(key: string): TuiStatusFieldRecord | undefined {
+    return this.fields.get(key)
+  }
+
+  fieldCount(): number {
+    return this.fields.size
+  }
+
+  /** How many footer fields one activation currently owns (cap enforcement). */
+  fieldsOwnedBy(owner: object): number {
+    let count = 0
+    for (const record of this.fields.values()) {
+      if (record.owner === owner) count += 1
+    }
+    return count
+  }
+
+  /** Clear `key` only while it still holds this token AND owner. */
+  clearFieldIf(key: string, token: number, owner?: object): boolean {
+    const current = this.fields.get(key)
+    if (owner !== undefined && current?.owner !== owner) return false
+    if (current?.token !== token) return false
+    this.fields.delete(key)
+    this.fieldSnapshot = [...this.fields.values()].map(record => record.entry)
+    this.emit()
+    return true
+  }
+
+  /** UI-side handler for a plugin click that threw; the service logs first. */
+  setFieldErrorHandler(handler?: (key: string, error: Error) => void): void {
+    this.onFieldError = handler
+  }
+
+  reportFieldError(key: string, error: Error): void {
+    this.onFieldError?.(key, error)
+  }
+
   /** Clear `key` only while it still holds the write tagged `token` — a
    *  stale disposer must not wipe a newer contribution (even one with
    *  identical text). Returns true when this call actually cleared. */
@@ -227,11 +349,13 @@ export class TuiStatusStore {
 
   /** Drop everything (teardown). */
   clear(): void {
-    if (this.entries.size === 0 && this.views.size === 0) return
+    if (this.entries.size === 0 && this.views.size === 0 && this.fields.size === 0) return
     this.entries.clear()
     this.views.clear()
+    this.fields.clear()
     this.snapshot = []
     this.viewSnapshot = []
+    this.fieldSnapshot = []
     this.emit()
   }
 
@@ -392,6 +516,258 @@ export class TuiStatusRuntime extends Service {
       {
         operation: had ? 'replace' : 'bind',
         resource: { kind: 'status', id: normalized },
+        result: 'applied',
+        ...(had ? { replaces: { resourceId: normalized } } : {}),
+      },
+      identity,
+    )
+    ledgerApplied = true
+    return dispose
+  }
+
+  /**
+   * Insert (or update/clear) one keyed TEXT field in the prompt footer's
+   * existing left/right groups — no new row, no plugin component. The field
+   * keeps the same admission contract as `set()`: plugin caller, activation
+   * ownership, token-based disposers, effect-ledger records, never throws.
+   *
+   * Unlike `set()`, footer fields are capped (six total, two per activation)
+   * and each cell is truncated by the host to `maxCells` (default 16, at most
+   * 32) so the row's flex shrinking always has a definite bound. `detail` and
+   * `onClick` are optional; a click without a detail line is refused (the
+   * footer must never promise an action it cannot explain on hover).
+   *
+   * Passing `undefined` (or text that sanitizes to nothing) CLEARS the field;
+   * a stale disposer cannot clear a newer write for the same key.
+   */
+  setField(
+    key: string,
+    text: string | number | boolean | undefined,
+    options?: TuiStatusFieldOptions,
+    identity?: Context,
+  ): () => void {
+    const state = statusStateFor(this)
+    assertCapabilityShadowPolicy('host.status.set', state.runtime.mode, state.runtime.slices)
+    const noop = (): void => {}
+    let caller: Context
+    try {
+      caller = requirePluginCaller(this.ctx, 'tuiStatus.setField', this)
+    } catch {
+      this.ctx.logger.warn('dsh-tui: tuiStatus.setField requires a live non-root plugin activation')
+      return noop
+    }
+    const store = state.store
+    // Capture the logger now: a click handler can outlive the activation, and
+    // reaching back through a disposed caller proxy would only mask the error.
+    const logger = caller.logger
+    if (identity !== undefined) {
+      try {
+        assertCallerContext(caller, identity, 'tuiStatus.setField')
+      } catch {
+        logger.warn('dsh-tui: tuiStatus.setField rejected an identity belonging to another activation')
+        return noop
+      }
+    }
+    const owner = activationFiber(caller)
+    if (owner === undefined) {
+      logger.warn('dsh-tui: tuiStatus.setField requires a live activation owner')
+      return noop
+    }
+    let normalized: string
+    try {
+      normalized = String(key ?? '').trim().toLowerCase()
+    } catch {
+      logger.warn('dsh-tui: tuiStatus.setField rejected an uncoercible key')
+      return noop
+    }
+    if (!KEY_PATTERN.test(normalized)) {
+      logger.warn('dsh-tui: tuiStatus.setField rejected an invalid key')
+      return noop
+    }
+    const existing = store.fieldEntry(normalized)
+    const ledger = caller.get('tuiEffectLedger')
+    // Clear path. Ownership is checked BEFORE anything is removed: another
+    // activation's field is not this caller's to clear.
+    const clear = (): () => void => {
+      if (existing === undefined) return noop
+      if (existing.owner !== owner) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — the field belongs to another activation`)
+        return noop
+      }
+      if (store.clearFieldIf(normalized, existing.token, owner)) {
+        ledger?.record(
+          { operation: 'release', resource: { kind: 'status-field', id: normalized }, result: 'applied' },
+          identity,
+        )
+      }
+      return noop
+    }
+    if (text === undefined || text === '') return clear()
+    // Scalar-only coercion, same rule as set(): an object must not become
+    // "[object Object]" nor be silently downgraded to a clear.
+    if (typeof text !== 'string' && typeof text !== 'number' && typeof text !== 'boolean') {
+      logger.warn(`dsh-tui: tuiStatus.setField rejected non-scalar text for "${normalized}"`)
+      return noop
+    }
+    let rawOptions: TuiStatusFieldOptions
+    if (options === undefined) {
+      rawOptions = {}
+    } else if (typeof options !== 'object' || options === null || Array.isArray(options)) {
+      logger.warn(`dsh-tui: tuiStatus.setField rejected invalid options for "${normalized}"`)
+      return noop
+    } else {
+      rawOptions = options
+    }
+    // The options object is plugin-supplied, so a throwing getter (or a Proxy)
+    // must take the documented reject-and-warn path instead of escaping into
+    // the caller. Read every option once, inside one guard: the checks below
+    // then cannot re-trigger a getter.
+    let optionMaxCells: number | undefined
+    let optionSlot: TuiStatusFieldSlot | undefined
+    let optionTone: TuiStatusFieldTone | undefined
+    let optionMinColumns: number | undefined
+    let optionDetail: string | undefined
+    let optionOnClick: (() => void) | undefined
+    try {
+      optionMaxCells = rawOptions.maxCells
+      optionSlot = rawOptions.slot
+      optionTone = rawOptions.tone
+      optionMinColumns = rawOptions.minColumns
+      optionDetail = rawOptions.detail
+      optionOnClick = rawOptions.onClick
+    } catch {
+      logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — unreadable options`)
+      return noop
+    }
+    const prev = existing?.entry
+    let maxCells = prev?.maxCells ?? FIELD_CELLS_DEFAULT
+    if (optionMaxCells !== undefined) {
+      if (typeof optionMaxCells !== 'number' || !Number.isInteger(optionMaxCells)) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — maxCells must be an integer`)
+        return noop
+      }
+      maxCells = Math.min(FIELD_CELLS_MAX, Math.max(1, optionMaxCells))
+    }
+    const cleaned = cleanStatusFieldText(text, maxCells)
+    // Whitespace/control/bidi-only text is a clear (set() folds it the same
+    // way). Checked before the remaining option gates: a clear carries no
+    // rendered options to validate.
+    if (cleaned === '') return clear()
+    let slot = prev?.slot ?? 'left-tail'
+    if (optionSlot !== undefined) {
+      if (!FIELD_SLOTS.has(optionSlot)) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — invalid slot`)
+        return noop
+      }
+      slot = optionSlot
+    }
+    let tone = prev?.tone ?? 'dim'
+    if (optionTone !== undefined) {
+      if (!FIELD_TONES.has(optionTone)) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — invalid tone`)
+        return noop
+      }
+      tone = optionTone
+    }
+    let minColumns = prev?.minColumns ?? 0
+    if (optionMinColumns !== undefined) {
+      if (typeof optionMinColumns !== 'number' || !Number.isInteger(optionMinColumns)) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — minColumns must be an integer`)
+        return noop
+      }
+      minColumns = Math.min(FIELD_MIN_COLUMNS_MAX, Math.max(0, optionMinColumns))
+    }
+    let detail = prev?.detail
+    if (optionDetail !== undefined) {
+      if (typeof optionDetail !== 'string') {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — detail must be a string`)
+        return noop
+      }
+      // An explicitly empty/unsafe detail means "no detail", not "keep the old
+      // one" — omitted is the only spelling that carries the previous value.
+      detail = cleanStatusFieldText(optionDetail, FIELD_DETAIL_CELLS) || undefined
+    }
+    let rawOnClick = existing?.rawOnClick
+    if (optionOnClick !== undefined) {
+      if (typeof optionOnClick !== 'function') {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — onClick must be a function`)
+        return noop
+      }
+      rawOnClick = optionOnClick
+    }
+    if (rawOnClick !== undefined && detail === undefined) {
+      // D3: a clickable cell owes the user an explanation on hover.
+      logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — onClick requires detail`)
+      return noop
+    }
+    if (existing === undefined) {
+      if (store.fieldCount() >= MAX_FIELDS) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}": ${MAX_FIELDS} footer fields already shown`)
+        return noop
+      }
+      if (store.fieldsOwnedBy(owner) >= MAX_FIELDS_PER_OWNER) {
+        logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}": ${MAX_FIELDS_PER_OWNER} footer fields per plugin already shown`)
+        return noop
+      }
+    } else if (existing.owner !== owner) {
+      logger.warn(`dsh-tui: tuiStatus.setField rejected "${normalized}" — the field belongs to another activation`)
+      return noop
+    }
+    // The wrapper lives HERE, not in the UI: a throwing click and a REJECTED
+    // async click share one funnel — both are logged and reported as a toast.
+    // A bare `rawOnClick()` leaves a returned promise unobserved, and an
+    // unhandled rejection is fatal to the process guard; `shortcuts.ts` uses
+    // the same deferred funnel for its handlers.
+    const onClick = rawOnClick === undefined
+      ? undefined
+      : (): void => {
+          Promise.resolve()
+            .then(() => rawOnClick())
+            .catch((error: unknown) => {
+              const failure = error instanceof Error ? error : new Error(String(error))
+              logger.warn(`dsh-tui: tuiStatus.setField "${normalized}" click failed: ${failure.message}`)
+              store.reportFieldError(normalized, failure)
+            })
+        }
+    const token = state.nextToken++
+    const entry: TuiStatusFieldEntry = Object.freeze({
+      key: normalized,
+      text: cleaned,
+      slot,
+      tone,
+      maxCells,
+      minColumns,
+      ...(detail === undefined ? {} : { detail }),
+      ...(onClick === undefined ? {} : { onClick }),
+    })
+    store.setField(entry, token, owner, rawOnClick)
+    const had = existing !== undefined
+    let disposed = false
+    let ledgerApplied = false
+    let ownerCleanup: (() => unknown) | undefined
+    const dispose = (): void => {
+      if (disposed) return
+      disposed = true
+      if (store.clearFieldIf(normalized, token, owner) && ledgerApplied) {
+        caller.get('tuiEffectLedger')?.record(
+          { operation: 'release', resource: { kind: 'status-field', id: normalized }, result: 'applied' },
+          identity,
+        )
+      }
+      const cleanup = ownerCleanup
+      ownerCleanup = undefined
+      cleanup?.()
+    }
+    const bound = bindCallerEffect(caller, dispose, cleanup => {
+      ownerCleanup = cleanup
+    })
+    // bindCallerEffect runs the disposer itself when registration fails, so the
+    // store entry is already rolled back here.
+    if (!bound) return noop
+    ledger?.record(
+      {
+        operation: had ? 'replace' : 'bind',
+        resource: { kind: 'status-field', id: normalized },
         result: 'applied',
         ...(had ? { replaces: { resourceId: normalized } } : {}),
       },

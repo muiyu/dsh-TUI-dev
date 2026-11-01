@@ -8,8 +8,10 @@
  *      Esc 跳过**回到落地页**（第七版：不再收掉落地页落到对话页）。
  *   B. 提交首句的落点：提交一句 → 落在对话页、草稿就在输入框里、会话浏览器
  *      不再盖着（第七版起 boot 不预开浏览器，落地页是第一屏）。
- *   C. 会开整屏界面的快捷入口（第七版：**盖在落地页之上**，Esc 回落地页——
- *      从启动页进入对话页的唯一路径 = Enter 提交一条非命令消息）。
+ *   C. 会开整屏界面的快捷入口盖在落地页之上，Esc 回落地页。
+ *   NL. Shift/Option+Enter：带着未发送草稿进入聊天页，在光标处换行，保留图片；
+ *      同批的 Ctrl+C 按"已交接的草稿"清空，不按空输入退出；换屏那一刻插件
+ *      对话框已 pending 时，同批按键等输入解除暂停后再重放，不丢文字。
  *   D. 覆盖层动作（模型 / 主题 / 语言）不收落地页。
  *   E. 记账：向导里 Esc（跳过）**不写** onboarding.json；→→→Enter 走完才写。
  *   F. 最小模式：落地页整体不存在（launchpadVisible 真的接在渲染链上）。
@@ -33,6 +35,7 @@ process.env.DSH_TUI_LANG = 'zh'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import type { ComposerImageRef, StagedImageInput } from '../adapter/ports/channel-view.js'
+import type { PromptController } from '../src/components/PromptInput.js'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import React from 'react'
@@ -54,6 +57,7 @@ const [
   { kernelEntriesOf },
   { listBackends },
   { applySidePanelOpen, applySidePanelPanels, getSidePanelOpen, getSidePanelPanels },
+  { TuiDialogStore },
 ] = await Promise.all([
   import('../src/ui.js'),
   import('../src/screens/Chat.js'),
@@ -66,6 +70,7 @@ const [
   import('../src/components/kernelCatalog.js'),
   import('../src/dsh-adapter/backend-registry.js'),
   import('../src/tuiDisplayPrefs.js'),
+  import('../src/dsh-adapter/dialogs.js'),
 ])
 
 /** 内核目录：与真机组合根同源（`kernelEntriesOf(listBackends())`）——选择器那一屏
@@ -290,6 +295,7 @@ function makeChannel(over: Record<string, unknown> = {}) {
 }
 
 interface Flags {
+  stdoutIsTTY?: boolean
   launchpadOnBoot?: boolean
   onboardingOnBoot?: boolean
   openHomeOnBoot?: boolean
@@ -300,6 +306,7 @@ async function mountChat(flags: Flags, over: Record<string, unknown> = {}, chatP
   const columns = flags.columns ?? COLS
   const term = new XTerm({ cols: columns, rows: ROWS, scrollback: 0, allowProposedApi: true })
   const stdout = new FakeStdout(term)
+  stdout.isTTY = flags.stdoutIsTTY ?? true
   const stdin = new FakeStdin()
   const { channel, notifications, calls } = makeChannel(over)
   const node = (
@@ -406,6 +413,78 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   before.length > 0 && after.length === before.length
   && before.every((l, i) => l === after[i])
 
+// OSC status belongs to this rendered app's stream, which an embedder may
+// supply independently of process.stdout.
+{
+  const ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY')
+  const savedStatusFlag = process.env.DSH_TUI_PROGRAM_STATUS
+  process.env.DSH_TUI_PROGRAM_STATUS = '1'
+  try {
+    for (const stdoutIsTTY of [true, false]) {
+      Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: !stdoutIsTTY })
+      const chat = await mountChat({ launchpadOnBoot: true, stdoutIsTTY })
+      await settled(() => chat.screen().includes('说点什么'))
+      check(`OSC 7501 follows app stdout TTY=${stdoutIsTTY} despite the opposite process stdout`,
+        chat.stdout.frames.join('').includes('\x1b]7501;') === stdoutIsTTY)
+      await chat.unmount()
+    }
+  } finally {
+    if (ttyDescriptor === undefined) Reflect.deleteProperty(process.stdout, 'isTTY')
+    else Object.defineProperty(process.stdout, 'isTTY', ttyDescriptor)
+    if (savedStatusFlag === undefined) delete process.env.DSH_TUI_PROGRAM_STATUS
+    else process.env.DSH_TUI_PROGRAM_STATUS = savedStatusFlag
+  }
+}
+
+// Real Codex login -> interaction -> QuestionStore -> Chat -> OSC status.
+{
+  const [{ createCodexAuthCapability }, { createCodexAuth }, { createCodexHub }, { createFakeAppServer }, { attachInteraction }, { PermissionStore }] = await Promise.all([
+    import('../src/backends/codex/auth/status.js'), import('../src/backends/codex/auth/external-tokens.js'),
+    import('../src/backends/codex/rpc/hub.js'), import('./lib/codex-fake-app-server.js'),
+    import('../src/channel/interaction.js'), import('../src/channel/permissions.js'),
+  ])
+  const savedStatusFlag = process.env.DSH_TUI_PROGRAM_STATUS
+  process.env.DSH_TUI_PROGRAM_STATUS = '1'
+  const questions = new QuestionStore()
+  const fake = createFakeAppServer()
+  fake.on('account/login/start', () => ({ type: 'chatgptDeviceCode', loginId: 'status-device', verificationUrl: 'https://auth.openai.com/codex/device', userCode: 'ABCD-EFGH' }))
+  fake.on('account/login/cancel', () => ({}))
+  const hub = createCodexHub({ executable: '/fake/codex-status', args: ['app-server'], env: {}, cwd: '/TMP/project' }, { transportFactory: fake.transportFactory })
+  const auth = createCodexAuthCapability(createCodexAuth({ hub, cwd: '/TMP/project', config: {} }), batch => interaction.apply(batch))
+  const interaction = attachInteraction({ permissions: new PermissionStore(), questions, debug: () => undefined }, {
+    sessionId: 'codex-status', capabilities: { questions: { respond: auth.respondQuestion, cancel: auth.cancelQuestion } },
+  })
+  const chat = await mountChat({}, {}, { questionStore: questions })
+  const report = () => [...chat.stdout.frames.join('').matchAll(/\x1b\]7501;([^\x1b]*)\x1b\\/gu)].at(-1)?.[1] ?? ''
+  let flow: Promise<void> | undefined
+  try {
+    for (const [method, index] of [['API key', 1], ['device code', 0]] as const) {
+      flow = auth.capability.login()
+      await settle(() => questions.getSnapshot() !== null)
+      check(`OSC 7501 ${method} method selection is blocked/auth`,
+        await settled(() => report().startsWith('state=blocked:kind=auth:')), report())
+      questions.answerCurrent({ selected: [questions.getSnapshot()!.question.options![index]!.label] })
+      await settle(() => method === 'API key' ? questions.getSnapshot()?.question.secret === true : questions.getSnapshot()?.question.link !== undefined)
+      check(`OSC 7501 ${method} purpose survives the real interaction/store path`,
+        questions.getSnapshot()?.question.purpose === 'auth' && report().startsWith('state=blocked:kind=auth:'), report())
+      auth.withdrawAll()
+      await flow
+      await settle(() => !report().startsWith('state=blocked:'))
+    }
+    interaction.apply([{ type: 'question.request', request: { requestId: 'ordinary-question', questions: [{ header: 'Codex', question: 'Token?', options: [], secret: true }] } }])
+    check('OSC 7501 an unmarked secret question remains blocked/question',
+      await settled(() => report().startsWith('state=blocked:kind=question:')), report())
+  } finally {
+    auth.dispose()
+    interaction.release()
+    await flow
+    await chat.unmount()
+    await hub.close()
+    if (savedStatusFlag === undefined) delete process.env.DSH_TUI_PROGRAM_STATUS
+    else process.env.DSH_TUI_PROGRAM_STATUS = savedStatusFlag
+  }
+}
+
 // ── A. /setup 打开向导 ─────────────────────────────────────────────────────
 {
   const chat = await mountChat({ launchpadOnBoot: true })
@@ -465,6 +544,125 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
       && chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('⌘')),
     chat.screen().slice(0, 240))
   await chat.unmount()
+}
+
+// ── NL. 启动页换行：进入聊天页继续编辑，不提交 ──
+for (const fullscreen of [false, true]) {
+  for (const columns of [120, 48]) {
+    const controller = React.createRef<PromptController>()
+    const chat = await mountChat(
+      { launchpadOnBoot: true, openHomeOnBoot: true, columns }, {},
+      { fullscreen, promptControllerRef: controller },
+    )
+    const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns}`
+    try {
+      await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+      await chat.type('前🙂后')
+      await chat.send('\x1b[D')
+      await chat.send('\x1b[13;2u')
+      check(`NL1[${label}] Shift+Enter 进入聊天页，在光标处换行且不发送`,
+        await settled(() => controller.current?.text() === '前🙂\n后'
+          && !chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('新建会话'))
+          && !chat.calls.some(call => call.startsWith('submit:')), chat.screen())
+      await chat.type('续')
+      check(`NL2[${label}] 光标留在新行开头`,
+        await settled(() => controller.current?.text() === '前🙂\n续后'), controller.current?.text())
+      await chat.send('\r')
+      check(`NL3[${label}] 后续 Enter 只发送一次完整多行消息`,
+        await settled(() => chat.calls.filter(call => call.startsWith('submit:')).length === 1)
+          && chat.calls.includes('submit:前🙂\n续后'), JSON.stringify(chat.calls))
+    } finally { await chat.unmount() }
+  }
+}
+for (const fullscreen of [false, true]) {
+  for (const newline of ['\x1b[13;2u', '\x1b\r']) {
+    const controller = React.createRef<PromptController>()
+    const chat = await mountChat({ launchpadOnBoot: true, columns: 48 }, {}, { fullscreen, promptControllerRef: controller })
+    try {
+      await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+      await chat.type('前🙂后')
+      await chat.send('\x1b[D')
+      await chat.send(newline + '续' + newline + '末\x1b[D中')
+      check(`NL batch [${fullscreen ? 'fullscreen' : 'inline'} ${JSON.stringify(newline)}] 保留换屏后的文字、连续换行和光标编辑`,
+        await settled(() => controller.current?.text() === '前🙂\n续\n中末后')
+          && !chat.calls.some(call => call.startsWith('submit:')), controller.current?.text())
+      await chat.send('\r')
+      check(`NL batch [${fullscreen ? 'fullscreen' : 'inline'}] 后续发送一次完整草稿`,
+        await settled(() => chat.calls.includes('submit:前🙂\n续\n中末后'))
+          && chat.calls.filter(call => call.startsWith('submit:')).length === 1, JSON.stringify(chat.calls))
+    } finally { await chat.unmount() }
+  }
+}
+for (const key of ['\x1b[13;2u', '\x1b\r']) {
+  const controller = React.createRef<PromptController>()
+  const chat = await mountChat({ launchpadOnBoot: true }, { ready: false, agentId: '' }, { promptControllerRef: controller })
+  try {
+    await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+    await chat.send(key)
+    check(`NL4[${JSON.stringify(key)}] 后端未就绪、空草稿也能进入聊天页换行`,
+      await settled(() => controller.current?.text() === '\n' && !chat.screen().includes(LAUNCHPAD_MARK))
+        && !chat.calls.some(call => call.startsWith('submit:')), chat.screen())
+  } finally { await chat.unmount() }
+}
+{
+  const controller = React.createRef<PromptController>()
+  const chat = await mountChat({ launchpadOnBoot: true }, {}, { promptControllerRef: controller })
+  try {
+    await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+    await chat.type('/model')
+    await chat.send('\x1b[13;2u')
+    check('NL5 命令补全开启时 Shift+Enter 保留命令原文，不执行候选',
+      await settled(() => controller.current?.text() === '/model\n' && !chat.screen().includes(LAUNCHPAD_MARK))
+        && !modelOpen(chat.screen()) && !chat.calls.some(call => call.startsWith('submit:')), chat.screen())
+  } finally { await chat.unmount() }
+}
+for (const key of ['\x1b[13;2u', '\x1b\r']) {
+  const controller = React.createRef<PromptController>()
+  const chat = await mountChat({ launchpadOnBoot: true }, {}, { promptControllerRef: controller })
+  try {
+    await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+    await chat.type('前🙂后')
+    await chat.send(key + '\x03')
+    check(`NL8[${JSON.stringify(key)}] 同批 Ctrl+C 清空已交接的草稿，不把它当空输入退出`,
+      await settled(() => controller.current?.text() === '' && !chat.screen().includes(LAUNCHPAD_MARK))
+        && !chat.calls.some(call => call.startsWith('submit:')), chat.screen())
+  } finally { await chat.unmount() }
+}
+// NL9：换屏那一刻插件对话框已经 pending —— 聊天页输入框以 `suspended` 挂载，
+// `onInputReady` 必须等输入真正可接收才重放；等待期间队列归 Chat 保留。
+// 旧实现挂载即通知，Chat 清空队列后重放给 `isActive: !suspended` 丢弃的监听，
+// 同批后续文字永久丢失（尾随 Enter 也一样）。
+for (const fullscreen of [false, true]) {
+  for (const tail of ['tail', 'tail\r']) {
+    const controller = React.createRef<PromptController>()
+    const dialogs = new TuiDialogStore()
+    const chat = await mountChat(
+      { launchpadOnBoot: true, columns: 48 }, {},
+      { fullscreen, promptControllerRef: controller, extensionDialogs: dialogs },
+    )
+    const label = `${fullscreen ? 'fullscreen' : 'inline'} ${JSON.stringify(tail)}`
+    try {
+      await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+      await chat.type('draft')
+      void dialogs.ask({ kind: 'confirm', title: '插件确认', message: '继续？' })
+      await settle(() => dialogs.getSnapshot() !== null)
+      // 同一个 stdin chunk：换行键 + 换屏后的后续输入（可能带尾随 Enter）。
+      await chat.send('\x1b[13;2u' + tail)
+      const key = dialogs.getSnapshot()?.key
+      if (key === undefined) throw new Error('confirm dialog did not park')
+      dialogs.decide(key, true)
+      if (tail.endsWith('\r')) {
+        check(`NL9[${label}] 对话框关闭后才重放：同批尾随 Enter 只发送一次完整草稿`,
+          await settled(() => chat.calls.includes('submit:draft\ntail'))
+            && chat.calls.filter(call => call.startsWith('submit:')).length === 1,
+          JSON.stringify(chat.calls))
+      } else {
+        check(`NL9[${label}] 对话框关闭后才重放：同批后续文字不丢`,
+          await settled(() => controller.current?.text() === 'draft\ntail')
+            && !chat.calls.some(call => call.startsWith('submit:')), controller.current?.text())
+      }
+    } finally { await chat.unmount() }
+  }
 }
 
 // ── C. 会话管理与设置入口 ──
@@ -1655,6 +1853,44 @@ const AC4_CUT_PRESET = 'Standard (Git Bash'
       } finally { await chat.unmount() }
     }
   }
+  for (const fullscreen of [false, true]) {
+    const fixture = imageHarness()
+    const controller = React.createRef<PromptController>()
+    const chat = await mountChat({ launchpadOnBoot: true, columns: 48 }, fixture.patch, { fullscreen, promptControllerRef: controller })
+    try {
+      await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+      await chat.send(pastePath)
+      await settle(() => fixture.staged.size === 1 && chat.screen().includes('[Image #1]'))
+      await chat.send('\x1b[13;2u\x1b[13;2u描述\r')
+      check(`NL batch image [${fullscreen ? 'fullscreen' : 'inline'}] 连续换行后同批发送保留图片绑定`,
+        await settled(() => fixture.submissions.length === 1)
+          && fixture.submissions[0]!.text === '[Image #1] \n\n描述'
+          && fixture.submissions[0]!.images.length === 1
+          && fixture.submissions[0]!.images[0]?.stageId === 'launchpad-stage-1'
+          && fixture.discarded.length === 0, JSON.stringify(fixture.submissions))
+    } finally { await chat.unmount() }
+  }
+  {
+    const fixture = imageHarness()
+    const controller = React.createRef<PromptController>()
+    const chat = await mountChat({ launchpadOnBoot: true, columns: 48 }, fixture.patch, { fullscreen: true, promptControllerRef: controller })
+    try {
+      await settle(() => chat.screen().includes(LAUNCHPAD_MARK))
+      await chat.send(pastePath)
+      await settle(() => fixture.staged.size === 1 && chat.screen().includes('[Image #1]'))
+      await chat.send('\x1b[13;2u')
+      check('NL6 Shift+Enter 交接图片绑定，保留附件且不提交',
+        await settled(() => controller.current?.text() === '[Image #1] \n')
+          && fixture.staged.size === 1 && fixture.discarded.length === 0 && fixture.submissions.length === 0, chat.screen())
+      await chat.type('描述')
+      await chat.send('\r')
+      check('NL7 聊天页 Enter 携带换行后的文字与原图片，只提交一次',
+        await settled(() => fixture.submissions.length === 1)
+          && fixture.submissions[0]!.text === '[Image #1] \n描述'
+          && fixture.submissions[0]!.images.length === 1
+          && fixture.submissions[0]!.images[0]?.stageId === 'launchpad-stage-1', JSON.stringify(fixture.submissions))
+    } finally { await chat.unmount() }
+  }
   {
     const fixture = imageHarness()
     const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
@@ -1872,6 +2108,13 @@ const AC4_CUT_PRESET = 'Standard (Git Bash'
         await chat.send('\x17')
         check(`Z25[${mode}] Ctrl+W 不拆开图片 token`,
           await settled(() => !chat.screen().includes('Image #') && fixture.staged.size === 0 && fixture.discarded.length === 3), chat.screen())
+        for (const seq of ['\x1b\x7f', '\x1b[127;3u']) {
+          await paste()
+          const discarded = fixture.discarded.length
+          await chat.send(seq)
+          check(`Z25a[${mode}] Option+Backspace ${JSON.stringify(seq)} 整体删除图片并释放附件`,
+            await settled(() => !chat.screen().includes('Image #') && fixture.staged.size === 0 && fixture.discarded.length === discarded + 1), chat.screen())
+        }
         await chat.type('[Image #9]')
         await chat.send('\x7f')
         check(`Z26[${mode}] 没有附件绑定的字面 token 仍逐字编辑`,

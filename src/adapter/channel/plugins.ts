@@ -23,6 +23,13 @@ function projectSettingsSection(section: TuiSettingsSection): HostChannelSetting
   return Object.freeze({
     ns: section.ns,
     title: section.title,
+    ...(section.page === undefined ? {} : {
+      page: Object.freeze({
+        id: section.page.id,
+        title: section.page.title,
+        ...(section.page.descriptions === undefined ? {} : { descriptions: Object.freeze({ ...section.page.descriptions }) }),
+      }),
+    }),
     ...(section.groups === undefined ? {} : {
       groups: Object.freeze(section.groups.map(group => Object.freeze({ id: group.id, title: group.title }))),
     }),
@@ -33,6 +40,7 @@ function projectSettingsSection(section: TuiSettingsSection): HostChannelSetting
       ...(field.hint === undefined ? {} : { hint: field.hint }),
       ...(field.group === undefined ? {} : { group: field.group }),
       ...(field.options === undefined ? {} : { options: Object.freeze(field.options.map(option => Object.freeze({ ...option }))) }),
+      ...(field.optionsSource === undefined ? {} : { optionsSource: field.optionsSource }),
       ...(field.placeholder === undefined ? {} : { placeholder: field.placeholder }),
       ...(field.secret === undefined ? {} : { secret: Object.freeze({ ref: field.secret.ref }) }),
     }))),

@@ -34,7 +34,7 @@ import { panelStore, type PanelStoreEvent } from '../components/sidePanel/PanelS
 import type { PanelDefinition, PanelOwner } from '../components/sidePanel/types.js'
 import { makePluginPanelComponent } from '../components/sidePanel/pluginPanelAdapter.js'
 import { panelBridgeRequests } from '../components/sidePanel/panelBridge.js'
-import { applySidePanelPanels, getSidePanelPanels, parseSidePanelIds } from '../tuiDisplayPrefs.js'
+import { isTemporarySidePanelId, setTemporarySidePanelHidden } from '../tuiDisplayPrefs.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import type { TuiPluginStorage } from './plugin-storage.js'
 import {
@@ -99,6 +99,25 @@ export type TuiPanelDividerProps = React.ComponentProps<
 >
 
 /**
+ * 面板内 markdown 正文：只收字符串。宽度走面板作用域的 TerminalSizeContext
+ * （PanelHost 已把 columns 收窄到面板宽），主题走只读 useTheme。
+ *
+ * 与上面几个**刻意不同**：它们是「直通宿主组件、只砍危险 prop」的 Omit 收窄，
+ * 这两个是**新定义的包装面**——只承诺一个字段，宿主组件的 props、实现与依赖
+ * 怎么改都不动这里的契约（包装在 components/sidePanel/panelMarkdown.tsx）。
+ */
+export interface TuiPanelMarkdownProps {
+  readonly children: string
+}
+
+/** 面板内单个代码块：收原始文本 + 可选语言标签；围栏长度、语言标签清洗与
+ *  语法高亮都由宿主包装层负责，插件拿不到 token 或 highlight 句柄。 */
+export interface TuiPanelCodeBlockProps {
+  readonly code: string
+  readonly language?: string
+}
+
+/**
  * 面板内 UI kit：宿主 React + 收窄组件 + Panel 尺寸感知。钩子和元素
  * 必须走宿主 React（与 plugin scene 同一 single-React 规则）。
  */
@@ -119,12 +138,56 @@ export interface TuiPanelUi {
   readonly useAnimationTime: (intervalMs: number | null) => number
   /** 只读主题。 */
   readonly useTheme: typeof import('../ui.js').useTheme
+  /** 面板内 markdown 正文（实验性）；只收字符串，拿不到 token/句柄。 */
+  readonly Markdown: React.ComponentType<TuiPanelMarkdownProps>
+  /** 面板内单个代码块（实验性）；围栏与高亮由宿主负责。 */
+  readonly CodeBlock: React.ComponentType<TuiPanelCodeBlockProps>
 }
+
+// ── 两个新成员的类型守卫（照 status.ts 的 Assert 写法）────────────────────
+//
+// 把「成员必须是收窄包装、不能换成原组件」钉成编译错误：一旦有人把成员换回
+// `typeof Markdown` / `CodeBlockFrame`，ComponentProps 里就会重新出现
+// token/highlight/dimColor 这些字段，Extract 不再是 never，Assert<false> 直接红。
+
+type Assert<T extends true> = T
+
+type _TuiPanelMarkdownForbidsHostProps = Assert<
+  Extract<
+    'dimColor' | 'cacheTokens' | 'inlineMathImages',
+    keyof React.ComponentProps<TuiPanelUi['Markdown']>
+  > extends never
+    ? true
+    : false
+>
+
+type _TuiPanelMarkdownRequiresChildren = Assert<
+  'children' extends keyof React.ComponentProps<TuiPanelUi['Markdown']> ? true : false
+>
+
+type _TuiPanelCodeBlockForbidsTokensAndHandle = Assert<
+  Extract<
+    'token' | 'highlight' | 'dimColor' | 'forceWidth' | 'ref',
+    keyof React.ComponentProps<TuiPanelUi['CodeBlock']>
+  > extends never
+    ? true
+    : false
+>
+
+type _TuiPanelCodeBlockRequiresCode = Assert<
+  'code' extends keyof React.ComponentProps<TuiPanelUi['CodeBlock']> ? true : false
+>
 
 export type TuiPanelBadgeLevel = 'info' | 'warning' | 'error'
 export type TuiPanelMode = 'split' | 'zoom' | 'fullscreen'
 
-/** v2.1 键盘契约的插件视图：preventDefault() = 阻止宿主回退键。 */
+/**
+ * v2.1 键盘契约的插件视图：preventDefault() = 阻止宿主回退键。
+ *
+ * 分栏渲染时 keymap 可重映射的 `paste` 组合（默认 Ctrl+V / Alt+V，macOS 上
+ * 还接受 Cmd+V）会先投递给活动面板；只看 `input` 字符的字母快捷键必须先
+ * 排除 `ctrl`/`meta`/`super`，否则粘贴键会误触自己的快捷键。
+ */
 export interface TuiPanelKeyEvent {
   readonly input: string
   readonly key: import('../components/sidePanel/types.js').SidePanelKeyFlags
@@ -273,8 +336,7 @@ function panelStateFor(runtime: TuiPanelRuntime): PanelState {
   return state
 }
 
-/** 无 Component identity 的裸挂载（测试夹具）需要一个稳定命名空间：
- * 按 activation fiber 发号。 */
+/** Anonymous activation ids are session-only, never persistent identities. */
 const fallbackPluginIds = new WeakMap<object, string>()
 let fallbackSeq = 0
 
@@ -286,7 +348,7 @@ function pluginIdFor(caller: Context, owner: object): string {
   let fallback = fallbackPluginIds.get(owner)
   if (fallback === undefined) {
     fallbackSeq += 1
-    fallback = 'act' + String(fallbackSeq)
+    fallback = 'session:act' + String(fallbackSeq)
     fallbackPluginIds.set(owner, fallback)
   }
   return fallback
@@ -486,8 +548,8 @@ export class TuiPanelRuntime extends Service {
     const ownerTag: PanelOwner = { pluginId, activation: owner }
     const unregister = panelStore.register(definition, ownerTag)
     setPanelOwnerRecord(finalId, { caller, owner, pluginId, lastOpenAt: 0 })
-    // 注册即入侧栏启用列表（PanelBar 可见；/panel 与 /settings 仍可移除）。
-    enablePanelIdInStore(finalId)
+    // 注册只动注册表：启用集合由 `sidePanel.panels` 的值派生
+    // （`*` = 全部已注册面板），注册路径绝不改写设置或 live store。
 
     let disposed = false
     let ownerCleanup: (() => unknown) | undefined
@@ -495,10 +557,13 @@ export class TuiPanelRuntime extends Service {
       if (disposed) return
       disposed = true
       // 先撤 store（unregistered 事件还需 owner record 做订阅过滤），再清
-      // owner 数据与启用列表。
+      // owner 数据。
       unregister()
       deletePanelOwnerRecord(finalId)
-      disablePanelIdInStore(finalId)
+      // 临时面板的「本次运行隐藏」随这一次注册一起结束：同一个 activation
+      // 再次注册拿到的是同一个 session:actN:x，重新注册是一次新的贡献
+      // （与旧机制在注册时清掉显式移除同义），不能让它一出生就被藏住。
+      if (isTemporarySidePanelId(finalId)) setTemporarySidePanelHidden(finalId, false)
       caller.get('tuiEffectLedger')?.record(
         { operation: 'release', resource: { kind: 'panel', id: finalId }, result: 'applied' },
         identity,
@@ -626,57 +691,6 @@ export class TuiPanelRuntime extends Service {
     bindCallerEffect(caller, dispose)
     return dispose
   }
-}
-
-// ── 启用列表接线（tuiDisplayPrefs 的 panels CSV；无环的 module store）──
-
-/** 本进程内由插件注册、尚未撤下的面板 id：配置应用时并回启用 CSV，免得
- * 先于 dsh-tui 行注册的面板被配置覆盖挤掉。 */
-const registeredPanelIds = new Set<string>()
-
-/** 用户在 /settings 显式移除的已注册面板 id（Session 级）：配置 CSV 分辨不出
- * 「用户移除了它」与「文档还不知道它」，没有这份记录并集会把它一次次并回。 */
-const removedPanelIds = new Set<string>()
-
-/** 注册成功后把最终 id 追加进侧栏启用 CSV（已存在则不动）——注册即
- * 可见：PanelBar 出胶囊、open()/1-9/z 生效；/panel 与 /settings 仍可移除。
- * 重新注册是一次新的贡献：上一轮的显式移除不再对它生效。 */
-function enablePanelIdInStore(id: string): void {
-  registeredPanelIds.add(id)
-  removedPanelIds.delete(id)
-  const ids = [...parseSidePanelIds(getSidePanelPanels())]
-  if (!ids.includes(id)) ids.push(id)
-  applySidePanelPanels(ids.join(','))
-}
-
-/** 撤下时把最终 id 从启用 CSV 摘掉（PanelHost 对缺失的 active 自动回
- * 退到第一个已启用 Panel），并从注册集合里移除，后续配置应用不再并回。 */
-function disablePanelIdInStore(id: string): void {
-  registeredPanelIds.delete(id)
-  const ids = parseSidePanelIds(getSidePanelPanels()).filter(candidate => candidate !== id)
-  applySidePanelPanels(ids.join(','))
-}
-
-/** 应用 `sidePanel.panels` 配置，已注册的面板 id 并回尾部（除非被显式移除）。 */
-export function applyConfiguredSidePanelPanels(configured: string | undefined): void {
-  const ids = [...parseSidePanelIds(configured ?? getSidePanelPanels())]
-  for (const id of registeredPanelIds) {
-    if (removedPanelIds.has(id) || ids.includes(id)) continue
-    ids.push(id)
-  }
-  applySidePanelPanels(ids.join(','))
-}
-
-/**
- * /settings 编辑那一跳：先记下用户删掉的已注册 id，再走并集。boot settings **不得**走这里——
- * 那时 CSV 缺席的已注册 id 只说明它注册得晚，不是用户移除。
- */
-export function applySidePanelPanelsFromSettings(configured: string | undefined): void {
-  if (configured !== undefined) {
-    const ids = new Set(parseSidePanelIds(configured))
-    for (const id of registeredPanelIds) if (!ids.has(id)) removedPanelIds.add(id)
-  }
-  applyConfiguredSidePanelPanels(configured)
 }
 
 export function getHostPanelRuntime(runtime: TuiPanelRuntime | undefined): TuiPanelHost | undefined {

@@ -37,7 +37,7 @@ import { join, resolve } from 'node:path'
 import type { BundleInfo, PluginInfo, PluginRegistries, PluginSpecInspection } from '@deepseek-ai/dsh-plugin-manager/types'
 import { parseManifest, projectManifest } from '../adapter/standard/protocols.js'
 import { DATA_DIR } from '../utils/paths.js'
-import { t } from '../i18n.js'
+import { t, type I18nKey } from '../i18n.js'
 import { loadSpecData } from '../adapter/standard/registry.js'
 import { createContractIndex, validatePlugin, negotiate } from '../adapter/standard/admission.js'
 import type { NegotiationDecision } from '../adapter/standard/types.js'
@@ -45,6 +45,7 @@ import { cleanScalarText } from './sanitize.js'
 import type { GrantStore } from '../adapter/standard/grants.js'
 import type { HostDescriptorBuild } from '../adapter/standard/descriptor.js'
 import { isCompositionOwned, pluginDeclarationIn, type PluginDeclaration, type PluginInstallNotice } from './plugin-declaration.js'
+import { TUI_EXPERIMENTAL_BUNDLES } from './experimental-bundles.js'
 import { extraBundles, localizedPluginText, type PluginManagerView } from './plugin-manager.js'
 import { PLUGIN_STORAGE_DIR } from './plugin-storage.js'
 import { EFFECT_LEDGER_NAME } from './effect-ledger.js'
@@ -178,18 +179,30 @@ export interface PluginFootprintOverrides {
   readonly storageDir?: string | undefined
 }
 
-/** The plugin set for the matrix: grants-file keys ∪ ledger pluginIds ∪
- *  storage namespaces ('host'/'undeclared' ledger identities are not
- *  plugins and are excluded). */
-export function pluginFootprints(paths: PluginFootprintPaths): string[] {
-  const found = new Set<string>()
+/** The three footprint sources, each as the set of plugin ids it names. */
+interface PluginFootprintSources {
+  readonly grants: Set<string>
+  readonly ledger: Set<string>
+  readonly storage: Set<string>
+}
+
+/**
+ * Read the three sources once. {@link pluginFootprints} and
+ * {@link pluginFootprintSourcesOf} both go through this, so the matrix, the
+ * "is anything left" check and the per-source residue report cannot disagree
+ * about what counts as a footprint.
+ */
+function pluginFootprintSourceSets(paths: PluginFootprintPaths): PluginFootprintSources {
+  const grants = new Set<string>()
+  const ledger = new Set<string>()
+  const storage = new Set<string>()
   try {
     const raw: unknown = JSON.parse(readFileSync(join(paths.dataDir, 'extension-grants.json'), 'utf8'))
     if (raw !== null && typeof raw === 'object') {
       const table = raw as { grants?: unknown; denies?: unknown }
       for (const section of [table.grants, table.denies]) {
         if (section !== null && typeof section === 'object') {
-          for (const plugin of Object.keys(section)) found.add(plugin)
+          for (const plugin of Object.keys(section)) grants.add(plugin)
         }
       }
     }
@@ -199,19 +212,40 @@ export function pluginFootprints(paths: PluginFootprintPaths): string[] {
   }
   for (const record of readLedgerRecords(paths.ledgerFile)) {
     if (typeof record.pluginId === 'string' && record.pluginId !== '' && record.pluginId !== 'host' && record.pluginId !== 'undeclared') {
-      found.add(record.pluginId)
+      ledger.add(record.pluginId)
     }
   }
   try {
     for (const entry of readdirSync(paths.storageDir)) {
       if (!entry.endsWith('.json')) continue
       const namespace = decodeURIComponent(entry.slice(0, -'.json'.length))
-      if (namespace !== '') found.add(namespace)
+      if (namespace !== '') storage.add(namespace)
     }
   } catch {
     // No storage directory yet: no rows from this source.
   }
-  return [...found].sort()
+  return { grants, ledger, storage }
+}
+
+/** The plugin set for the matrix: grants-file keys ∪ ledger pluginIds ∪
+ *  storage namespaces ('host'/'undeclared' ledger identities are not
+ *  plugins and are excluded). */
+export function pluginFootprints(paths: PluginFootprintPaths): string[] {
+  const sources = pluginFootprintSourceSets(paths)
+  return [...new Set([...sources.grants, ...sources.ledger, ...sources.storage])].sort()
+}
+
+/** Which of the three sources still names one plugin id. */
+export function pluginFootprintSourcesOf(
+  pluginId: string,
+  overrides: PluginFootprintOverrides = {},
+): { readonly grants: boolean; readonly ledger: boolean; readonly storage: boolean } {
+  const sources = pluginFootprintSourceSets(pluginFootprintPaths(overrides))
+  return {
+    grants: sources.grants.has(pluginId),
+    ledger: sources.ledger.has(pluginId),
+    storage: sources.storage.has(pluginId),
+  }
 }
 
 /**
@@ -225,16 +259,6 @@ export function pluginFootprintPaths(overrides: PluginFootprintOverrides = {}): 
     ledgerFile: overrides.ledgerFile ?? join(dataDir, EFFECT_LEDGER_NAME),
     storageDir: overrides.storageDir ?? join(dataDir, PLUGIN_STORAGE_DIR),
   }
-}
-
-/**
- * Whether one plugin id still has a footprint in this profile: a grants-file
- * key, an effect-ledger record, or a storage namespace. The same three sources
- * the matrix unions — a removal that left something behind is read here rather
- * than by a second reader that could disagree with the report (C-5).
- */
-export function pluginFootprintContains(pluginId: string, overrides: PluginFootprintOverrides = {}): boolean {
-  return pluginFootprints(pluginFootprintPaths(overrides)).includes(pluginId)
 }
 
 /** `/plugin check <path>`: official parse/projection + profile validation + negotiation. */
@@ -298,9 +322,10 @@ function checkManifestLines(pathArg: string, deps: PluginsInfoDeps): string[] {
   const decision = negotiate(index, manifest, host.descriptor, granted)
   lines.push(...decisionLines(decision))
   if (decision.decision === 'waiting_authorization') {
-    // Close the loop on the five-state vocabulary: the user sees not just
-    // the state but the exact file + shape that flips it (the interactive
-    // grant flow is future work; this hint is its no-UI prerequisite).
+    // Close the loop on the five-state vocabulary: the user sees not just the
+    // state but the exact file + shape that flips it. `/plugin install` and
+    // `/plugin enable` are the interactive grant path; this hint stays for the
+    // static `check <path>` route, which may run with no live service.
     lines.push(t('plugins-check-grant-hint', {
       id: cell(manifest.id),
       perms: cell(decision.deniedPermissions.join(', ')),
@@ -621,16 +646,76 @@ function needsDeclarationLegend(deps: PluginsInfoDeps, bundles: readonly BundleI
   return bundles.some(bundle => !isCompositionOwned(bundle.name) && deps.declaration?.(bundle.name) === undefined)
 }
 
-/** `/plugin list`: the plugins this profile added, one line each. */
+/** One installation-supplied experimental bundle and its usage hint. */
+interface ExperimentalEntry {
+  readonly bundle: BundleInfo
+  readonly hint: I18nKey
+}
+
+/**
+ * The TUI experimental features this installation supplies, in catalog order.
+ * A bundle the profile itself added (`installed: true`) is the person's own
+ * plugin and stays in the "you added" section; only the installation-supplied
+ * half is advertised here.
+ */
+function experimentalEntries(bundles: readonly BundleInfo[]): ExperimentalEntry[] {
+  return TUI_EXPERIMENTAL_BUNDLES.flatMap(entry => {
+    const bundle = bundles.find(candidate =>
+      candidate.name === entry.name && candidate.optional && !candidate.installed)
+    return bundle === undefined ? [] : [{ bundle, hint: entry.hint }]
+  })
+}
+
+/** The switch line and the usage hint of one experimental bundle, when readable. */
+function experimentalUsageLines(bundle: BundleInfo, hint: I18nKey): string[] {
+  if (bundle.error !== undefined) return []
+  return [
+    `    ${t(bundle.enabled ? 'plugins-experimental-disable' : 'plugins-experimental-enable', { bundle: cell(bundle.name) })}`,
+    `    ${t(hint)}`,
+  ]
+}
+
+/** One experimental row: title, version and state, without plugin-declaration tags. */
+function experimentalLine(bundle: BundleInfo): string {
+  const flags = [t(bundle.enabled ? 'plugins-bundle-on' : 'plugins-bundle-off')]
+  if (bundle.error !== undefined) flags.push(t('plugins-bundle-problem', { code: cell(bundle.error.code) }))
+  const title = cell(localizedPluginText(bundle, bundle.name))
+  const version = bundle.version === undefined ? '' : ` ${cell(bundle.version)}`
+  return `  ${title}${version} · ${flags.join(' · ')}`
+}
+
+/** The experimental section; empty when the installation supplies none. */
+function experimentalLines(entries: readonly ExperimentalEntry[]): string[] {
+  if (entries.length === 0) return []
+  const lines = [t('plugins-experimental-header', { count: String(entries.length) })]
+  for (const { bundle, hint } of entries) {
+    lines.push(experimentalLine(bundle))
+    lines.push(...experimentalUsageLines(bundle, hint))
+  }
+  return lines
+}
+
+/** `/plugin list`: the plugins this profile added, then switchable experimental features. */
 function listLines(deps: PluginsInfoDeps, bundles: readonly BundleInfo[]): string[] {
   const extras = extraBundles(bundles)
-  if (extras.length === 0) return [t('plugins-list-empty')]
-  const lines = [t('plugins-list-header', { count: String(extras.length) })]
-  for (const bundle of extras) lines.push(bundleLine(deps, bundle, { rows: false }))
-  // The tag is explained once per report, next to the rows it qualifies: this
-  // surface is a transcript, so there is nothing to click open (C-3).
-  if (needsDeclarationLegend(deps, extras)) lines.push(t('plugins-tag-undeclared-hint'))
-  lines.push(t('plugins-list-hint'))
+  const experimental = experimentalEntries(bundles)
+  if (extras.length === 0 && experimental.length === 0) return [t('plugins-list-empty')]
+  const lines: string[] = []
+  if (extras.length === 0) {
+    lines.push(t('plugins-list-empty'))
+  } else {
+    lines.push(t('plugins-list-header', { count: String(extras.length) }))
+    for (const bundle of extras) lines.push(bundleLine(deps, bundle, { rows: false }))
+    // The tag is explained once per report, next to the rows it qualifies: this
+    // surface is a transcript, so there is nothing to click open (C-3).
+    if (needsDeclarationLegend(deps, extras)) lines.push(t('plugins-tag-undeclared-hint'))
+  }
+  // Separate the two sections (and their entries) so the report reads as
+  // blocks instead of one dense list.
+  if (experimental.length > 0) {
+    if (lines.length > 0) lines.push('')
+    lines.push(...experimentalLines(experimental))
+  }
   return lines
 }
 

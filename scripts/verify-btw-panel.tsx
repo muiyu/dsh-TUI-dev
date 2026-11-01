@@ -7,13 +7,24 @@
  *    就不通知侧栏；失败的一轮保留已流出的部分答复；连按键（两键之间
  *    没有重渲染）不丢字、退格整删 emoji。
  *  - 全屏场景（BtwThreadScene）：Esc 退出编辑后 Tab 回到 composer 继续打字。
+ *  - 粘贴路由（issue #1767）：右栏聚焦时 Ctrl+V/Alt+V 落 btw composer、面板
+ *    不消费也被宿主吞掉；主草稿不被插入（Linux 用假 wl-paste 走真实读取，
+ *    另有一条模块级 reader 的跨平台面板分发断言）；全屏场景同能力。
  *  - 浮层回退（BtwPanelFallback）：粘贴的换行、带修饰的 Enter 不关浮层，
  *    只有无修饰的 Enter 才关（关闭即中止在途侧问）。
  *  - Chat 级（真 Chat + fake channel）：/btw 快路由——面板启用时路由进侧栏
  *    且浮层反针不出现（单一 surface）；未启用时浮层回退，Esc 关闭即 abort。
+ *  - Chat 级分栏掩码（issue #1631）：窄屏（<93 列）或 splitEnabled=false 时
+ *    面板「已启用」但分栏渲不出来，/btw 必须退浮层、且不写无效的打开状态；
+ *    整屏编辑器占屏时给一句提示，而不是把浮层开在它底下。
+ *  - Chat 级 surface 切换（issue #1631）：浮层开着时把终端拉宽——分栏画的是
+ *    别的面板，浮层必须留在原处；分栏正好画的是 btw，浮层让位、线程进侧栏，
+ *    主输入框回来（`btwOverlayVisible` 不能停在「不可见却仍占键盘」）。
+ *    移交后展开整屏编辑器，草稿可继续编辑、收起后保留；主任务问卷异步
+ *    到达时先接管显示与 Enter，回答后恢复仍在途的侧问（inline/fullscreen）。
  * 运行：node --import tsx/esm scripts/verify-btw-panel.tsx
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
@@ -25,7 +36,7 @@ const fixtureHome = mkdtempSync(join(tmpdir(), 'verify-btw-panel-'))
 process.env.HOME = fixtureHome
 process.env.USERPROFILE = fixtureHome
 
-const [React, { Terminal: XTerm }, ui, { SidePanelLayout }, { SidePanelColumn }, { useSidePanel }, prefs, { setLang, t }, { QuestionStore }, { LOCAL_COMMANDS }, { Chat }, { btwThreads }, { BtwThreadScene }, { BtwPanelFallback }, { panelStore }, { btwComposerKey }] = await Promise.all([
+const [React, { Terminal: XTerm }, ui, { SidePanelLayout }, { SidePanelColumn }, { useSidePanel }, prefs, { setLang, t }, { QuestionStore }, { LOCAL_COMMANDS }, { Chat }, { btwThreads }, { BtwThreadScene }, { BtwPanelFallback }, { panelStore }, { btwComposerKey }, { setBtwClipboardReaderForTest }] = await Promise.all([
   import('react'),
   import('@xterm/headless'),
   import('../src/ui.js'),
@@ -42,9 +53,10 @@ const [React, { Terminal: XTerm }, ui, { SidePanelLayout }, { SidePanelColumn },
   import('../src/components/BtwPanel.js'),
   import('../src/components/sidePanel/PanelStore.js'),
   import('../src/components/sidePanel/btw/BtwComposer.js'),
+  import('../src/components/sidePanel/btw/useBtwComposerPaste.js'),
 ])
 const { render, ThemeProvider, Box, Text, AlternateScreen, useInput, useTerminalSize } = ui
-const { applySidePanelOpen, applySidePanelRatio, applySidePanelPanels } = prefs
+const { applySidePanelOpen, applySidePanelRatio, applySidePanelPanels, applySidePanelSplitEnabled, getSidePanelOpen } = prefs
 setLang('zh')
 
 const ROWS = 22
@@ -55,6 +67,11 @@ function check(name: string, ok: boolean, extra = ''): void {
 }
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 const ESC = String.fromCharCode(27)
+/** 主输入框行首的会话入口（⌸），浮层/侧栏接管时它随 PromptInput 一起消失。 */
+const HOME_BUTTON = '\u2338'
+/** 展开草稿编辑器（Ctrl+Shift+E）/ 在编辑器里提交（Ctrl+Enter）。 */
+const CTRL_SHIFT_E = '\x1b[69;6u'
+const CTRL_ENTER = '\x1b[13;5u'
 
 function scriptedAsk() {
   const calls: { question: string }[] = []
@@ -85,6 +102,7 @@ function makePanelChannel(ask: ReturnType<typeof scriptedAsk>) {
     status: 'idle' as const,
     working: false,
     agentId: 'probe-session',
+    sessionId: 'probe-session',
     goal: undefined,
     todos: [],
     backgroundJobs: [],
@@ -410,15 +428,26 @@ async function keys(frame: Frame, sequence: readonly string[]): Promise<void> {
     JSON.stringify({ atHead, atTail, emptyHead, emptyTail }))
 }
 
-// ── F1: 全屏场景 Esc 退出编辑、Tab 回到 composer ─────────────────────────
+// ── F1: 全屏场景 Esc 退出编辑、Tab 回到 composer、Ctrl+V 粘贴 ────────────
 {
   btwThreads.resetForTest()
   const ask = scriptedAsk()
   const channel = makePanelChannel(ask)
-  const frame = await mountTree(100, <BtwThreadScene channel={channel as never} onClose={() => {}} />)
+  const frame = await mountTree(100, (
+    <BtwThreadScene
+      channel={channel as never}
+      onClose={() => {}}
+      readClipboardOverride={() => Promise.resolve({ kind: 'text', text: 'PASTED' })}
+    />
+  ))
   await keys(frame, ['a', 'b', ESC, '\t', 'c'])
   await delay(150)
   check('F1. Esc 后 Tab 回到 composer 继续编辑', btwThreads.get('probe-session')?.draft === 'abc', JSON.stringify(btwThreads.get('probe-session')?.draft))
+  // 全屏场景与侧栏面板同一套粘贴能力（issue #1767 的另一半：此前完全无反应）。
+  frame.stdin.write('\x16')
+  const scenePasted = await settled(() => btwThreads.get('probe-session')?.draft === 'abcPASTED')
+  check('F1b. 全屏场景 Ctrl+V 落进 composer', scenePasted,
+    JSON.stringify(btwThreads.get('probe-session')?.draft))
   await frame.app.unmount()
 }
 
@@ -494,20 +523,23 @@ const plainText = (frames: readonly string[]) => frames.join('')
   .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
   .replace(/\x1b\]9;[^\x07]*\x07/g, '')
 
-async function mountChat(ask: ReturnType<typeof scriptedAsk>) {
+async function mountChat(ask: ReturnType<typeof scriptedAsk>, cols = 100, fullscreen = true) {
   const channel = makeChatChannel(ask)
-  const term = new XTerm({ cols: 100, rows: ROWS, scrollback: 200, allowProposedApi: true })
-  const stdout = new FakeStdout(term, 100)
+  const questionStore = new QuestionStore()
+  const term = new XTerm({ cols, rows: ROWS, scrollback: 200, allowProposedApi: true })
+  const stdout = new FakeStdout(term, cols)
   const stdin = new FakeStdin()
+  let width = cols
+  const chat = <Chat channel={channel as never} questionStore={questionStore} fullscreen={fullscreen} />
   const instance = await render(
-    <Chat channel={channel as never} questionStore={new QuestionStore()} fullscreen />,
+    fullscreen ? <AlternateScreen>{chat}</AlternateScreen> : chat,
     { stdout: stdout as unknown as NodeJS.WriteStream, stdin: stdin as unknown as NodeJS.ReadStream, stderr: new FakeStderr() as unknown as NodeJS.WriteStream, exitOnCtrlC: false, patchConsole: false },
   )
   await delay(500)
   const lines = () => {
     const buf = term.buffer.active
     const out: string[] = []
-    for (let y = 0; y < ROWS; y += 1) out.push((buf.getLine(y)?.translateToString(false) ?? '').padEnd(100, ' '))
+    for (let y = 0; y < ROWS; y += 1) out.push((buf.getLine(y)?.translateToString(false) ?? '').padEnd(width, ' '))
     return out
   }
   // Negative checks read the rendered viewport after every write instead of
@@ -526,21 +558,29 @@ async function mountChat(ask: ReturnType<typeof scriptedAsk>) {
     for (const needle of watched.keys()) if (screen.includes(needle)) watched.set(needle, true)
   }
   return {
-    channel, stdout, stdin, lines,
+    channel, questionStore, stdout, stdin, lines,
     /** Start recording whether `needle` is ever on screen. */
     viewport,
     watch: (needle: string) => { watched.set(needle, viewport().includes(needle)) },
     seen: (needle: string) => watched.get(needle) === true,
     since: (mark: number) => plainText(stdout.frames.slice(mark)),
-    run: async (line: string) => {
+    run: async (line: string, submit = '\r') => {
       const from = stdout.frames.length
       stdin.write(line)
       await delay(150)
-      stdin.write('\r')
+      stdin.write(submit)
       await delay(600)
       return plainText(stdout.frames.slice(from))
     },
     unmount: async () => { await instance.unmount() },
+    /** 改列宽并让 ink 重排：窄屏浮层 ↔ 宽屏分栏的 surface 切换回归用。 */
+    resize: async (next: number) => {
+      width = next
+      term.resize(next, ROWS)
+      stdout.columns = next
+      stdout.emit('resize')
+      await delay(700)
+    },
     /** 硬件终端光标（IME 预编辑锚点）落点。 */
     cursor: () => ({ x: term.buffer.active.cursorX, y: term.buffer.active.cursorY }),
   }
@@ -609,6 +649,203 @@ async function mountChat(ask: ReturnType<typeof scriptedAsk>) {
     closed = chat.viewport()
   }
   check('C2d. 浮层关闭后回到普通聊天（视口里没有浮层）', !closed.includes(fallbackNote), closed.split('\n').filter(l => l.trim() !== '').slice(-4).join(' | '))
+  await chat.unmount()
+}
+
+// ── C3: 分栏渲不出来时 /btw 退浮层（issue #1631：绝不静默）────────────
+{
+  // 80 列 < canSplit 阈值（CHAT_MIN 64 + PANEL_MIN 28 + DIVIDER 1 = 93）。
+  // 修前：openPanel 只写了一个被 splitAvailable 掩掉的开关，屏幕不变、也
+  // 没有一句提示，用户无从判断命令有没有生效。
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelOpen(false)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 80)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  chat.watch(fallbackNote)
+  await chat.run('/btw 窄屏的问题一')
+  const narrow = chat.viewport()
+  check('C3a. 80 列 + btw 面板启用：浮层兜底出现并把题目上屏',
+    narrow.includes(fallbackNote) && narrow.includes('窄屏的问题一'),
+    narrow.split('\n').filter(l => l.trim() !== '').slice(-3).join(' | '))
+  check('C3b. 侧问照常发起（一次）', ask.calls.length === 1)
+  check('C3c. 分栏不可用时不写一个不生效的「侧栏打开」状态', getSidePanelOpen() === false)
+  await chat.unmount()
+}
+
+// ── C4: splitEnabled=false 是同一根因的另一条掩码，同样要退浮层──────
+{
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelSplitEnabled(false)
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 120)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  await chat.run('/btw 关掉分栏的问题')
+  const wide = chat.viewport()
+  check('C4a. splitEnabled=false：浮层兜底出现并把题目上屏',
+    wide.includes(fallbackNote) && wide.includes('关掉分栏的问题'),
+    wide.split('\n').filter(l => l.trim() !== '').slice(-3).join(' | '))
+  check('C4b. 侧问照常发起（一次）', ask.calls.length === 1)
+  await chat.unmount()
+  applySidePanelSplitEnabled(true)
+}
+
+// ── C5: 整屏编辑器占屏 → 发通知，别把浮层挂上去 ───────────────────────
+// 编辑器是全屏不透明 cover（PromptEditorLayer 是 Chat 根 Box 的最后一个
+// 孩子），toast 也在它下面，所以这一格能保证的是「不静默丢弃」+「不挂一
+// 个既看不见又会先吃掉编辑器按键的浮层」（useInput 按挂载顺序分发）。
+{
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 100)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  chat.watch(fallbackNote)
+  chat.stdin.write(CTRL_SHIFT_E)
+  await delay(400)
+  await chat.run('/btw 编辑器里的侧问', CTRL_ENTER)
+  check('C5a. 编辑器占屏：侧问被挡住这件事进了通知通道（不静默丢弃）',
+    chat.channel.notices.some(text => text.includes(t('btw-surface-busy'))),
+    JSON.stringify(chat.channel.notices))
+  check('C5b. 不在编辑器底下开一个看不见的浮层', !chat.seen(fallbackNote))
+  check('C5c. 侧问照常发起（一次）', ask.calls.length === 1)
+  await chat.unmount()
+}
+
+// ── C6: 窄屏浮层开着时把终端拉宽——分栏回来了，但画的是别的面板：浮层与
+// 题目必须留在原处。修前渲染门只问「分栏在不在」，浮层被悄悄卸掉，
+// btwOverlayOpen 仍为真又让 PromptInput 一直 suspended、Chat 的按键处理器
+// 一直让位（composer 消失、Esc/Ctrl+C 失效）────────────────────────────
+{
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelSplitEnabled(true)
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 92)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  await chat.run('/btw 拉宽之后还在的问题')
+  check('C6a. 92 列：分栏渲不出来，浮层兜底把题目上屏', chat.viewport().includes('拉宽之后还在的问题'))
+  await chat.resize(120)
+  const wide = chat.viewport()
+  check('C6b. 拉宽后侧栏出现（分栏在渲染）', wide.includes(t('panel-hint-unfocused')), wide.split('\n').slice(-2).join(' | '))
+  check('C6c. 但活动面板不是 btw：浮层与题目必须留在原处',
+    wide.includes(fallbackNote) && wide.includes('拉宽之后还在的问题'),
+    wide.split('\n').filter(l => l.trim() !== '').slice(-3).join(' | '))
+  check('C6d. 侧问仍然只发起一次', ask.calls.length === 1)
+  check('C6e. 没有被挡住的提示噪声', !chat.channel.notices.some(text => text.includes(t('btw-surface-busy'))))
+  await chat.unmount()
+}
+
+// ── C7: 对照组——侧栏就在 btw 面板上：拉宽后浮层让位、线程进侧栏，主输入框
+// 必须回来（btwOverlayVisible=false 才让 PromptInput 与按键恢复）────────
+{
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelSplitEnabled(true)
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 120)
+  await chat.run('/panel btw')
+  chat.stdin.write(ESC)
+  await delay(200)
+  chat.stdin.write(ESC)
+  await delay(300)
+  await chat.resize(92)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  await chat.run('/btw 侧栏接管的问题')
+  check('C7a. 缩窄到 92 列：浮层出现', chat.viewport().includes('侧栏接管的问题'))
+  await chat.resize(120)
+  const wide = chat.viewport()
+  check('C7b. 拉宽后浮层让位（单一 surface）', !wide.includes(fallbackNote))
+  check('C7c. 线程在侧栏可见', wide.includes('侧栏接管的问题'))
+  check('C7d. 主输入框回来（浮层不再接管输入）', wide.includes(HOME_BUTTON), wide.split('\n').slice(-2).join(' | '))
+  check('C7e. 侧问只发起一次', ask.calls.length === 1)
+  // 编辑器会临时收起分栏；残留的 fallback 请求不能因此重新暂停输入框，
+  // 否则编辑器发布/撤下相互触发，直到 React #185 重挂整树并丢掉草稿。
+  const draft = 'DRAFT-AFTER-BTW'
+  const editorTitle = t('input-expand-editor-title')
+  chat.stdin.write(draft)
+  await settle(() => chat.viewport().includes(draft))
+  chat.stdin.write(CTRL_SHIFT_E)
+  check('C7f. 移交侧栏后编辑器保持打开、草稿可见', await settled(() =>
+    chat.viewport().includes(editorTitle) && chat.viewport().includes(draft)))
+  if (process.env.BTW_SCREENSHOT) console.log('SCREENSHOT-C7-EDITOR\n' + chat.viewport())
+  chat.stdin.write('-KEPT')
+  check('C7g. 编辑器可继续编辑原草稿', await settled(() => chat.viewport().includes(draft + '-KEPT')))
+  chat.stdin.write(ESC)
+  check('C7h. 收起编辑器后主输入框保留完整草稿', await settled(() =>
+    !chat.viewport().includes(editorTitle) && chat.viewport().includes(HOME_BUTTON)
+    && chat.viewport().includes(draft + '-KEPT')))
+  check('C7i. 编辑器往返没有取消或重发侧问', ask.calls.length === 1
+    && btwThreads.get('probe-session')?.turns.at(-1)?.phase === 'running')
+  await chat.unmount()
+}
+
+// ── C8: 面板未启用 + 整屏编辑器占屏：同样只发通知。修前 `!btwPanelEnabled`
+// 会把浮层直接挂到编辑器底下——看不见却接管输入，编辑器一关才冒出来────
+{
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,companion')
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 100)
+  const fallbackNote = t('btw-panel-unavailable').slice(0, 10)
+  chat.stdin.write(CTRL_SHIFT_E)
+  await delay(400)
+  await chat.run('/btw 面板未启用时编辑器占屏', CTRL_ENTER)
+  check('C8a. 面板未启用也一样走通知（不静默丢弃）',
+    chat.channel.notices.some(text => text.includes(t('btw-surface-busy'))),
+    JSON.stringify(chat.channel.notices))
+  chat.stdin.write(ESC)
+  await delay(500)
+  const after = chat.viewport()
+  check('C8b. 关掉编辑器后不冒出那个「看不见的浮层」', !after.includes(fallbackNote))
+  check('C8c. 主输入框可用（浮层没有接管输入）', after.includes(HOME_BUTTON), after.split('\n').slice(-2).join(' | '))
+  check('C8d. 侧问照常发起（一次）', ask.calls.length === 1)
+  await chat.unmount()
+}
+
+// ── C9: 主任务问卷到达时先接管浮层；Enter 回答问卷，不误取消侧问 ───────
+for (const fullscreen of [true, false]) {
+  const mode = fullscreen ? 'fullscreen' : 'inline'
+  applySidePanelPanels('todo,jobs,agents,info,trajectory,workspace,btw,companion')
+  applySidePanelSplitEnabled(true)
+  applySidePanelOpen(true)
+  btwThreads.resetForTest()
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 80, fullscreen)
+  const sideQuestion = 'SIDE-THREAD-QUESTION'
+  const mainQuestion = 'MAIN-QUESTION'
+  await chat.run('/btw ' + sideQuestion)
+  check('C9a. ' + mode + ' 起点为在途侧问浮层', await settled(() => chat.viewport().includes(sideQuestion)))
+  chat.channel.working = true
+  const answerPromise = chat.questionStore.ask({ questions: [{
+    id: 'main-question',
+    question: mainQuestion,
+    options: [{ label: 'CONTINUE-MAIN' }],
+  }] }).then(
+    answer => ({ ok: true as const, answer }),
+    (error: unknown) => ({ ok: false as const, error: String(error) }),
+  )
+  check('C9b. ' + mode + ' 问卷先上屏、浮层让位', await settled(() =>
+    chat.viewport().includes(mainQuestion) && chat.viewport().includes('CONTINUE-MAIN')
+    && !chat.viewport().includes(sideQuestion)))
+  if (process.env.BTW_SCREENSHOT) console.log('SCREENSHOT-C9-' + mode + '\n' + chat.viewport())
+  chat.stdin.write('\r')
+  check('C9c. ' + mode + ' 第一次 Enter 即完成主问卷', await settled(() => chat.questionStore.getSnapshot() === null))
+  // 失败路径也要结清 ask：不能让一个永不 settle 的 await 掩掉断言失败。
+  if (chat.questionStore.getSnapshot() !== null) chat.questionStore.cancelCurrent()
+  const outcome = await answerPromise
+  check('C9d. ' + mode + ' 回答来自主问卷选项', outcome.ok
+    && outcome.answer.answers[0]?.selected[0] === 'CONTINUE-MAIN', JSON.stringify(outcome))
+  check('C9e. ' + mode + ' 回答后恢复仍在途的侧问浮层', await settled(() =>
+    chat.viewport().includes(sideQuestion) && !chat.viewport().includes(mainQuestion))
+    && ask.calls.length === 1 && btwThreads.get('probe-session')?.turns.at(-1)?.phase === 'running')
   await chat.unmount()
 }
 
@@ -937,6 +1174,119 @@ for (const phase of ['running', 'failed', 'cancelled'] as const) {
     Map.prototype.set = originalSet
     await frame?.app.unmount()
   }
+}
+
+// ── P20: 粘贴路由（issue #1767）：右栏聚焦时 Ctrl+V 不写主草稿 ──────────
+{
+  applySidePanelOpen(true)
+  applySidePanelRatio(0.62)
+  applySidePanelSplitEnabled(true)
+  applySidePanelPanels('btw')
+  btwThreads.resetForTest()
+  setBtwClipboardReaderForTest(() => Promise.resolve({ kind: 'text', text: 'PASTED-MARK' }))
+  const ask = scriptedAsk()
+  const chat = await mountChat(ask, 120)
+  // 主输入框先有一份草稿（焦点在聊天）：一旦粘贴串框，它会被插进这份草稿。
+  chat.stdin.write('主草稿')
+  await delay(300)
+  // Ctrl+B 聚焦右栏，Enter 进 btw composer 编辑层。
+  chat.stdin.write(String.fromCharCode(2))
+  await delay(300)
+  chat.stdin.write('\r')
+  await delay(300)
+  const beforePaste = btwThreads.get('probe-session')?.draft ?? ''
+  chat.stdin.write('\x16') // Ctrl+V（keymap paste）
+  const pasted = await settled(() => (btwThreads.get('probe-session')?.draft ?? '') === 'PASTED-MARK')
+  check('P20a. 面板焦点 Ctrl+V 落进 btw 草稿', beforePaste === '' && pasted,
+    JSON.stringify(btwThreads.get('probe-session')?.draft))
+  await chat.unmount()
+
+  // 真实读取路径（Linux：PATH 上放假的 wl-paste，与 repro-clipboard 同法）：
+  // 修复缺失时 PromptInput 的 paste 分支会读到同一份剪贴板并把内容插进主草稿
+  // ——这两条断言才真正对应 issue #1767 的串框现象（模块级 reader 只喂给 btw）。
+  if (process.platform === 'linux') {
+    const stubDir = mkdtempSync(join(tmpdir(), 'verify-btw-paste-'))
+    writeFileSync(join(stubDir, 'wl-paste'), [
+      '#!/bin/sh',
+      'if [ "$1" = "--version" ]; then echo stub; exit 0; fi',
+      'if [ "$1" = "--list-types" ]; then printf \'text/plain\\n\'; exit 0; fi',
+      "printf 'CLIP-STUB'",
+      '',
+    ].join('\n'), { mode: 0o755 })
+    const savedPath = process.env.PATH
+    const savedWayland = process.env.WAYLAND_DISPLAY
+    const savedDisplay = process.env.DISPLAY
+    process.env.PATH = stubDir
+    process.env.WAYLAND_DISPLAY = 'wayland-verify-btw-paste'
+    delete process.env.DISPLAY
+    setBtwClipboardReaderForTest(undefined) // 走真实 readClipboard（假 wl-paste）
+    try {
+      // btw 面板焦点：内容落 btw 草稿，主草稿保持不变。
+      applySidePanelSplitEnabled(true)
+      applySidePanelPanels('btw')
+      btwThreads.resetForTest()
+      const chatBtw = await mountChat(ask, 120)
+      chatBtw.stdin.write('真草稿')
+      await delay(300)
+      chatBtw.stdin.write(String.fromCharCode(2))
+      await delay(300)
+      chatBtw.stdin.write('\r')
+      await delay(300)
+      chatBtw.stdin.write('\x16')
+      const arrived = await settled(() => (btwThreads.get('probe-session')?.draft ?? '') === 'CLIP-STUB')
+      chatBtw.stdin.write(ESC)
+      await delay(200)
+      chatBtw.stdin.write(ESC)
+      await delay(400)
+      const btwRows = chatBtw.lines().filter(line => line.includes('真草稿'))
+      check('P20b. 真实剪贴板：内容落进 btw 草稿', arrived, JSON.stringify(btwThreads.get('probe-session')?.draft))
+      check('P20c. 真实剪贴板：主草稿不被粘贴污染',
+        btwRows.length > 0 && btwRows.every(line => !/真草稿CLIP-STUB/u.test(line)), JSON.stringify(btwRows))
+      await chatBtw.unmount()
+
+      // 活动面板不是 btw：粘贴同样被宿主吞掉，不再漏给主输入框。
+      applySidePanelSplitEnabled(true)
+      applySidePanelPanels('todo,btw')
+      btwThreads.resetForTest()
+      const chatTodo = await mountChat(ask, 120)
+      chatTodo.stdin.write('真草稿二')
+      await delay(300)
+      chatTodo.stdin.write(String.fromCharCode(2))
+      await delay(300)
+      chatTodo.stdin.write('\x16')
+      await delay(800)
+      chatTodo.stdin.write(ESC)
+      await delay(400)
+      const todoRows = chatTodo.lines().filter(line => line.includes('真草稿二'))
+      check('P20d. 真实剪贴板：非 btw 面板焦点时粘贴被吞（主草稿不变）',
+        todoRows.length > 0 && todoRows.every(line => !/真草稿二CLIP-STUB/u.test(line)), JSON.stringify(todoRows))
+      await chatTodo.unmount()
+
+      // 分栏收起（Ctrl+Shift+E 展开全屏草稿编辑器令 split 不再渲染）时不能拦：
+      // 此时唯一可见的输入框是编辑器，粘贴必须照旧落进去。
+      applySidePanelSplitEnabled(true)
+      applySidePanelPanels('btw')
+      btwThreads.resetForTest()
+      const chatEditor = await mountChat(ask, 120)
+      chatEditor.stdin.write(String.fromCharCode(2)) // 聚焦右栏
+      await delay(300)
+      chatEditor.stdin.write(CTRL_SHIFT_E)           // 展开全屏草稿编辑器
+      const editorOpen = await settled(() => chatEditor.lines().join('\n').includes('草稿编辑'))
+      chatEditor.stdin.write('\x16')
+      const editorPasted = await settled(() => chatEditor.lines().join('\n').includes('CLIP-STUB'))
+      check('P20e. 分栏收起（全屏编辑器）时粘贴仍落进编辑器', editorOpen && editorPasted,
+        JSON.stringify(chatEditor.lines().filter(line => line.includes('CLIP-STUB'))))
+      await chatEditor.unmount()
+    } finally {
+      process.env.PATH = savedPath
+      if (savedWayland === undefined) delete process.env.WAYLAND_DISPLAY
+      else process.env.WAYLAND_DISPLAY = savedWayland
+      if (savedDisplay === undefined) delete process.env.DISPLAY
+      else process.env.DISPLAY = savedDisplay
+      setBtwClipboardReaderForTest(() => Promise.resolve({ kind: 'text', text: 'PASTED-MARK' }))
+    }
+  }
+  setBtwClipboardReaderForTest(undefined)
 }
 
 btwThreads.resetForTest()

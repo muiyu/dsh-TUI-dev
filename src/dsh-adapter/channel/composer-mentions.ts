@@ -1,6 +1,6 @@
 import { isAbsolute, join } from 'node:path'
 import { extractMentions } from '../../utils/mentions.js'
-import { COMPOSER_IMAGE_TOKEN } from './composer-images.js'
+import { COMPOSER_IMAGE_TOKEN, ImageAdmissionError, saveAdmittedImage } from './composer-images.js'
 import {
   MENTION_MAX_DIR_ENTRIES,
   MENTION_MAX_FILE_CHARS,
@@ -9,6 +9,7 @@ import {
   tryResolveMention,
 } from './mentions.js'
 import { basename } from './paths.js'
+import { expandHomePrefix } from '../../utils/paths.js'
 import type { MentionAttachments, MentionExpansion, MentionFs, MentionImageBlock } from './types.js'
 
 /**
@@ -33,6 +34,8 @@ export async function expandComposerMentions(
   const blocks: MentionExpansion['blocks'] = [{ type: 'text', text }]
   const attached: string[] = []
   const missing: string[] = []
+  const imageAdjustments: NonNullable<MentionExpansion['imageAdjustments']> = []
+  const imageFailures: NonNullable<MentionExpansion['imageFailures']> = []
   const mentions = extractMentions(text)
   let budget = MENTION_MAX_TOTAL_CHARS
   let imageCount = 0
@@ -97,15 +100,22 @@ export async function expandComposerMentions(
     // admission has independent limits and still follows source order.
     if (budget <= 0 && imageMediaType === undefined) continue
     // Mentions resolve against the session cwd, same as the model-facing fs
-    // tools; absolute paths pass through untouched. A `#L12-14` line suffix
-    // (issue #359) is stripped before resolution; when the stripped path
-    // misses, the typed literal (suffix intact) gets ONE fallback try so
-    // filenames genuinely containing `#L…` still resolve as whole files.
-    const absolute = isAbsolute(mention.path) ? mention.path : join(cwd, mention.path)
+    // tools; absolute paths pass through untouched, and a leading literal `~/`
+    // (or `~\`) expands to the host home exactly like completion does (issue
+    // #1706 — this is the submit path, so without it a path the `@` menu
+    // listed was joined onto the workspace and silently went missing). A
+    // `#L12-14` line suffix (issue #359) is stripped before resolution; when
+    // the stripped path misses, the typed literal (suffix intact) gets ONE
+    // fallback try so filenames genuinely containing `#L…` still resolve as
+    // whole files.
+    const mentionPath = expandHomePrefix(mention.path)
+    const absolute = isAbsolute(mentionPath) ? mentionPath : join(cwd, mentionPath)
     let resolved = await tryResolveMention(fs, absolute)
     let literalFallback = false
+    let literalExpanded: string | undefined
     if (resolved === undefined && mention.literal !== undefined) {
-      const literalPath = isAbsolute(mention.literal) ? mention.literal : join(cwd, mention.literal)
+      literalExpanded = expandHomePrefix(mention.literal)
+      const literalPath = isAbsolute(literalExpanded) ? literalExpanded : join(cwd, literalExpanded)
       resolved = await tryResolveMention(fs, literalPath)
       literalFallback = resolved !== undefined
     }
@@ -116,7 +126,14 @@ export async function expandComposerMentions(
     const { target, info } = resolved
     // On a literal-fallback hit the attached file IS the typed name — the
     // model must see that path, not the suffix-stripped one.
-    const shownPath = literalFallback ? display : mention.path
+    //
+    // The model-facing path must also be resolvable by the fs tools, which
+    // resolve against the session cwd and do NOT expand `~` (issue #1706):
+    // when the typed path carried a home prefix, hand the model the expanded
+    // path. The user-visible `attached`/`missing` lists keep the typed string.
+    const shownPath = literalFallback
+      ? (literalExpanded !== undefined && isAbsolute(literalExpanded) ? literalExpanded : display)
+      : (isAbsolute(mentionPath) ? mentionPath : mention.path)
     // …and judge image-ness by the typed extension in that case too.
     const imageType = literalFallback && mention.literal !== undefined
       ? mentionImageMediaType(mention.literal)
@@ -124,27 +141,29 @@ export async function expandComposerMentions(
     if (info?.type === 'file') {
       if (imageType !== undefined && attachments !== undefined && fs.readBytes !== undefined) {
         const limits = attachments.imageLimits
-        if (!limits.mediaTypes.includes(imageType) || imageCount >= limits.maxImagesPerMessage) {
+        if (imageCount >= limits.maxImagesPerMessage) {
           missing.push(display)
           continue
         }
         try {
           const data = await fs.readBytes(target, undefined, limits.maxImageBytes)
-          if (imageBytes + data.byteLength > limits.maxMessageImageBytes) {
-            missing.push(display)
-            continue
-          }
-          const attachment = await attachments.saveImage({
+          const { attachment, adjustment } = await saveAdmittedImage(attachments, {
             data,
             mediaType: imageType,
             name: basename(target.displayPath),
           })
+          if (imageBytes + attachment.bytes > limits.maxMessageImageBytes) {
+            missing.push(display)
+            continue
+          }
           blocks.push({ type: 'image', attachment })
+          if (adjustment !== undefined) imageAdjustments.push({ path: display, adjustment })
           imageCount += 1
-          imageBytes += data.byteLength
+          imageBytes += attachment.bytes
           attached.push(display)
-        } catch {
+        } catch (error) {
           missing.push(display)
+          if (error instanceof ImageAdmissionError) imageFailures.push({ path: display, reason: error.message })
         }
         continue
       }
@@ -209,5 +228,5 @@ export async function expandComposerMentions(
     // Absent (stat → undefined) or a special file.
     missing.push(display)
   }
-  return { blocks, attached, missing }
+  return { blocks, attached, missing, ...(imageAdjustments.length === 0 ? {} : { imageAdjustments }), ...(imageFailures.length === 0 ? {} : { imageFailures }) }
 }

@@ -68,6 +68,7 @@ export const LEDGER_RESOURCE_KINDS = [
   'scene',
   'shortcut',
   'status',
+  'status-field',
   'renderer',
   'theme',
   'storage-namespace',

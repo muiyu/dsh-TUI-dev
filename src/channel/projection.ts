@@ -14,7 +14,7 @@
  * contract (the goldens pin `startedAt`/`durationMs` with a stepping clock).
  */
 import type { ChannelUi } from '../adapter/ports/channel-ui.js'
-import type { ChatRow, SelectionAttachment, TodoPanelItem, ToolCallView, TurnUsageSummary } from '../adapter/ports/channel-view.js'
+import type { ChatRow, SelectionAttachment, TodoPanelItem, ToolCallView, TurnOutcome, TurnUsageSummary } from '../adapter/ports/channel-view.js'
 import { markChannelReadDirty } from '../adapter/channel/read-view.js'
 import type { AgentEvent, AgentEventMeta, AgentEventOf, ContentBlockView, GoalSnapshot, ImageRef, UsageDelta } from '../agent/events.js'
 import { t } from '../i18n.js'
@@ -32,12 +32,15 @@ type Mutable<T> = { -readonly [K in keyof T]: T[K] }
 /** Notice keys whose live toast is tracked (a repeat replaces it). */
 const MAX_KEYED_TOASTS = 32
 
+/** Short buffered deliveries are not reliable decode-rate samples. */
+const MIN_TPS_DECODE_MS = 500
+
 /** The channel state slice the projector writes. */
 export interface ProjectionState extends Mutable<Pick<ChannelUi,
   | 'thinkingFold' | 'activeToolCount' | 'spinnerMode' | 'goal' | 'contextSegments' | 'tokens' | 'mainCost'
-  | 'model' | 'lastUsage' | 'turnUsage' | 'lastUserText' | 'responseChars' | 'tps' | 'cancelPending' | 'working'
+  | 'model' | 'lastUsage' | 'turnUsage' | 'turnOutcome' | 'lastUserText' | 'responseChars' | 'tps' | 'cancelPending' | 'working'
   | 'compaction' | 'turnStart' | 'contextWindow' | 'reasoningEffort' | 'sessionTitle' | 'agentPreset' | 'sessionColor'
-  | 'costReport'
+  | 'costReport' | 'workingDirectory'
 >> {
   rows: ChatRow[]
   tpsSamples: { tps: number; at: number }[]
@@ -531,7 +534,7 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
       tps.firstTokenTime ??= time
       tps.outputEstimate += tokenDeltaEstimate(delta)
       const elapsedMs = Math.max(0, time - tps.firstTokenTime)
-      if (elapsedMs > 500) {
+      if (elapsedMs > MIN_TPS_DECODE_MS) {
         const decodeMs = tpsTurnDecodeMs + elapsedMs
         const outputTokens = tpsTurnDecodeTokens + Math.ceil(tps.outputEstimate)
         state.tps = outputTokens / (decodeMs / 1000)
@@ -688,15 +691,15 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
     const usage = event.usage
     if (usage !== undefined) bookUsage(usage, event)
     const tpsMessageStep = tpsStep
-    // Same-timestamp delivery has no measurable decode span; its tokens
-    // must not inflate the rate of another step in this turn.
+    // Only reliable spans enter the rate ledger, including late-usage
+    // reconciliation. Billing above still includes every delivered token.
     if (
       tpsTurn === event.turn &&
       tpsMessageStep !== undefined &&
       tpsMessageStep.turn === event.turn &&
       tpsMessageStep.step === event.step &&
       tpsMessageStep.firstTokenTime !== undefined &&
-      event.time > tpsMessageStep.firstTokenTime
+      event.time - tpsMessageStep.firstTokenTime > MIN_TPS_DECODE_MS
     ) {
       const reported = usageOutputTokens(usage)
       const outputTokens = reported
@@ -1034,10 +1037,18 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
     // reads as the account of what just happened. A turn with no
     // usage-bearing message emits nothing (nothing was measured), and a
     // fully successful zero-usage turn stays quiet too.
-    const outcome: 'completed' | 'interrupted' | 'error' =
+    const outcome: TurnOutcome =
       reason.kind === 'completed' ? 'completed'
         : reason.kind === 'aborted' || reason.kind === 'interrupted' ? 'interrupted'
           : 'error'
+    // The turn's terminal state is projected from the close reason itself,
+    // NOT from the ledger below: a turn that emitted no usage-bearing message
+    // still ended (and can have failed or been cancelled), and the ledger is
+    // only written for the turns that measured something. Anything that asks
+    // "how did the turn that just ended close" reads this, so a usage-less
+    // failure can never inherit the previous turn's `completed` — or leave
+    // nothing behind on the first turn.
+    state.turnOutcome = outcome
     const emitTurnSummary = (): void => {
       if (!turnLedger.usageSeen) return
       const total = turnLedger.input + turnLedger.output + turnLedger.cacheRead + turnLedger.cacheWrite
@@ -1278,6 +1289,7 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
         deps.inputConvergence.cancelInFlight = false
         state.cancelPending = false
         state.working = true
+        state.turnOutcome = undefined
         state.turnStart = Date.now()
         state.responseChars = 0
         state.spinnerMode = 'requesting'
@@ -1352,6 +1364,10 @@ export function createChannelProjection(state: ProjectionState, deps: ChannelPro
         // `/color` accent, replayed on resume/rewind like the title: last
         // write wins, '' clears to the default.
         state.sessionColor = event.color
+        return
+      case 'session.cwd':
+        // Durable directory change, replayed like the title: last write wins.
+        state.workingDirectory = event.cwd
         return
       case 'todo.write':
         // The snapshot array is adopted as-is (the durable record owns it).

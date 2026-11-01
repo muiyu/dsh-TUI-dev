@@ -93,6 +93,9 @@ const manifestCases = [
   ['valid TUI contributions', 'conformance/fixtures/valid-tui-contributions.json', true],
   ['valid plugin coordinate subscriptions', 'conformance/fixtures/valid-plugin-object-subs.json', true],
   ['valid private protocol plugin', 'conformance/fixtures/valid-private-protocol-plugin.json', true],
+  // D-4 gap 6: `requires.contracts` may name a manifest extension coordinate
+  // (`tui.dsh/v1alpha1#Backend`); the host resolves it against `registry.extensions`.
+  ['valid extension coordinate plugin', 'conformance/fixtures/valid-extension-coordinate-plugin.json', true],
   ['invalid service rejected', 'conformance/fixtures/invalid-plugin-unknown-service.json', false],
   ['duplicate command rejected', 'conformance/fixtures/invalid-plugin-duplicate-command.json', false],
   ['unknown coordinate rejected', 'conformance/fixtures/invalid-plugin-unknown-coordinate.json', false],

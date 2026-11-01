@@ -172,8 +172,38 @@ const isVersionNewer = (a, b) => {
   return false
 }
 
+// The migrated launcher is a single file, so this conservative evaluator has
+// no package dependencies. Only stable positive-major caret / lower-bound OR
+// ranges are recognized. Unknown manifests or syntax must never block launch.
+const supportsNode = (version, range) => {
+  const current = parseVersion(version)
+  if (!current || typeof range !== 'string') return undefined
+  const alternatives = range.split('||').map(part => /^(\^|>=)([1-9]\d*)(?:\.(\d+))?(?:\.(\d+))?$/.exec(part.trim()))
+  if (alternatives.some(part => !part || (part[1] === '^' && part[3] === undefined))) return undefined
+  // Stable engine ranges exclude prereleases, including a future major's RC.
+  if (current.pre !== null) return false
+  return alternatives.some(part => {
+    const [, operator, major, minor = '0', patch = '0'] = part
+    const floor = [Number(major), Number(minor), Number(patch)]
+    const actual = [current.major, current.minor, current.patch]
+    const firstDifference = actual.findIndex((value, i) => value !== floor[i])
+    const atLeast = firstDifference < 0 || actual[firstDifference] > floor[firstDifference]
+    return atLeast && (operator !== '^' || current.major === floor[0])
+  })
+}
+const nodeRange = ownPackage?.name === PACKAGE ? ownPackage.engines?.node : undefined
+const nodeSupported = supportsNode(process.versions.node, nodeRange)
+
 const lang = process.env.DSH_TUI_LANG === 'en' ? 'en' : 'zh'
 const MSG = {
+  nodeUnsupported: {
+    en: `[dsh-tui] Node ${process.version} is unsupported (required: ${nodeRange}). Install a supported Node release from https://nodejs.org/en/download and reopen this terminal.`,
+    zh: `[dsh-tui] Node ${process.version} 不受支持（要求：${nodeRange}）。请从 https://nodejs.org/en/download 安装受支持的 Node 并重新打开终端。`,
+  },
+  nodeUnknown: {
+    en: `[dsh-tui] Cannot determine Node ${process.version} compatibility: package engines.node is missing or unrecognized (${nodeRange ?? 'unknown'}).`,
+    zh: `[dsh-tui] 无法判断 Node ${process.version} 兼容性：包 engines.node 缺失或无法识别（${nodeRange ?? 'unknown'}）。`,
+  },
   noDsh: {
     en: '[dsh-tui] dsh CLI not found. Install the official client first:\n  npm install -g @deepseek-ai/dsh',
     zh: '[dsh-tui] 未检测到 dsh CLI。请先安装官方客户端：\n  npm install -g @deepseek-ai/dsh',
@@ -490,6 +520,9 @@ const MSG = {
     en:
       `Usage: dsh-tui|dst [command] [options] [path|url]\n\n` +
       `Commands:\n` +
+      `  run / -p              Run one non-interactive DSH task (dst cli --help)\n` +
+      `  cli <command>          Independent automation CLI and management commands\n` +
+      `  dsh <argv...>          Forward native DSH arguments unchanged\n` +
       `  update                 Update the ${PROFILE} profile to the latest release\n` +
       `  migrate [agent]        Import conversations from claude-code/codex/omp/zcode/grok-build (--dry-run to preview)\n` +
       `  doctor                 Pre-flight environment checks (dsh/pnpm/profile/key)\n` +
@@ -509,6 +542,9 @@ const MSG = {
     zh:
       `用法：dsh-tui|dst [命令] [选项] [路径|URL]\n\n` +
       `命令：\n` +
+      `  run / -p              无界面运行单个 DSH 任务（dst cli --help）\n` +
+      `  cli <命令>             独立自动化 CLI 与管理命令\n` +
+      `  dsh <参数...>          原样转交官方 DSH CLI\n` +
       `  update                 将 ${PROFILE} profile 升级到最新版本\n` +
       `  migrate [agent]        迁移 claude-code/codex/omp/zcode/grok-build 的对话（--dry-run 预览）\n` +
       `  doctor                 启动前环境诊断（dsh/pnpm/profile/密钥）\n` +
@@ -529,9 +565,9 @@ const MSG = {
 }
 const msg = key => MSG[key][lang]
 
-// React 开发构建会把每次渲染的 performance.measure() 堆进无界缓冲区导致
-// 长会话 OOM——与仓库根 dsh-tui.cmd 保持一致，强制 production。
-process.env.NODE_ENV ??= 'production'
+// 与包入口的 force-production-react 保持一致：工作区 NODE_ENV 不能启用
+// React 开发构建的无界渲染插桩，调试须显式设置 DSH_TUI_REACT_DEV=1。
+process.env.NODE_ENV = process.env.DSH_TUI_REACT_DEV === '1' ? 'development' : 'production'
 
 const sameDir = (a, b) => {
   try {
@@ -595,6 +631,26 @@ if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
   console.log(msg('helpText'))
   process.exit(0)
 }
+// Help/version stay readable. Unknown engines in migrated/profile manifests
+// are allowed; doctor exposes the uncertainty without breaking delegation.
+if (subcommand !== 'doctor' && nodeSupported === false) {
+  console.error(msg('nodeUnsupported'))
+  process.exit(1)
+}
+// CLI is a separate, uncompiled application. Never bootstrap/render the TUI for
+// automation. A migrated single-file launcher prefers the updated profile copy.
+const cliInvocation = ['cli', 'run', '-p', '--print', 'session', 'models', 'skills', 'mcp', 'auth', 'capabilities', 'dsh'].includes(subcommand)
+if (cliInvocation) {
+  const profileEntry = join(profilePkgDir, 'cli', 'entry.mjs')
+  const ownEntry = join(ownDir, 'cli', 'entry.mjs')
+  const entry = existsSync(profileEntry) ? profileEntry : ownEntry
+  if (!existsSync(entry)) {
+    console.error('[dsh-tui] CLI_ENTRY_MISSING: update the profile or reinstall the package; no task was started.')
+    process.exit(3)
+  }
+  const { main } = await import(pathToFileURL(entry).href)
+  process.exit(await main(process.argv.slice(2)))
+}
 /**
  * The credential documents a read may consult, most authoritative first: the
  * active home's store, then the default `~/.dsh` store. A `DSH_HOME` override
@@ -645,7 +701,10 @@ const runDoctorChecks = () => {
   let hardFailure = false
   const report = (ok, label, detail) => lines.push(`${ok ? '✓' : '✗'} ${label}: ${detail}`)
   lines.push(`dsh-tui doctor · ${PACKAGE} ${ownVersion ?? 'unknown'}`)
-  report(true, 'node', `${process.version} · ${process.platform} ${process.arch}`)
+  report(nodeSupported === true, 'node', nodeSupported === true
+    ? `${process.version} · ${process.platform} ${process.arch}`
+    : msg(nodeSupported === false ? 'nodeUnsupported' : 'nodeUnknown'))
+  if (nodeSupported !== true) hardFailure = true
   const probeVersion = command => {
     const probe = spawnSync(...cmd(command, ['--version']), { stdio: 'pipe', encoding: 'utf8', ...shellOpt })
     if (probe.error || probe.status !== 0) return undefined
@@ -765,7 +824,7 @@ const renderSafeReport = extraLines => {
 // 启动前环境诊断——针对「TUI 起不来」的故障域（装不上、update 后版本不
 // 同步、密钥没配），与 TUI 内 /doctor 的会话内诊断互补。零 lib 依赖、
 // 不委托、不自举：profile 残缺时它必须还能跑。密钥红线：只报告是否已
-// 设置，绝不输出值。仅 dsh 缺失记为硬失败（其余检查全部照常打印后再
+// 设置，绝不输出值。Node 不兼容/无法判断或 dsh 缺失记为硬失败（其余检查照常打印后再
 // 以退出码 1 收束）。
 if (subcommand === 'doctor') {
   const { hardFailure, lines } = runDoctorChecks()

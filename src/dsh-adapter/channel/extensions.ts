@@ -31,7 +31,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { DshNative } from '../../agent/capabilities.js'
 import type { AgentSession } from '../../agent/session.js'
 import { channelCapabilities } from '../../channel/capabilities.js'
-import { isCommandCompletionToken, LOCAL_COMMANDS } from '../../commands.js'
+import { isCommandCompletionToken, LOCAL_COMMANDS, type LocalCommand } from '../../commands.js'
 import { touchSession } from '../../sessionHistory.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
 import { DEFAULT_SESSION_MODES, resolveSessionModes } from '../../sessionModes.js'
@@ -39,6 +39,7 @@ import { installedMeetsVersion } from '../contract.js'
 import { createDshSession } from '../backend/session.js'
 import { createDshTranslator, dshPricingWindow } from '../backend/translate.js'
 import { concreteService } from '../host-access.js'
+import { teamServiceActive, withTeamCommandVisibility } from '../team-mode.js'
 import { getHostMessageObserver, type TuiMessageObserverRuntime } from '../message-observer.js'
 import { createForeignBrowser } from '../migrate/browse.js'
 import { createPluginCompletionCatalog } from '../plugin-completions.js'
@@ -81,6 +82,7 @@ import { createSkillCatalog } from './skill-catalog.js'
 import { createSubagentProjection, type SubagentsServiceView } from './subagent-projection.js'
 import { readChildTranscriptPage } from './subagent-transcript.js'
 import { DSH_BACKEND_LABEL, type ChannelLaunchOptions } from './state.js'
+import { sessionWorkingDirectory } from '../../channel/working-directory.js'
 import { ensureUpstreamRetry } from './upstream-retry.js'
 import { foldBack } from './transcript.js'
 import type { BackgroundResult, ResumeResult } from './types.js'
@@ -258,10 +260,28 @@ export function attachDshExtensions(
   // service lookups, so both consumers may call it freely: the public
   // `capabilities()` accessor and the command-list annotation below.
   const capabilitiesOf = () => resolveAgentCapabilities(agentCapabilityEvidence(ctx, binding.agent))
+  // `/team` is gated on its service, not on a backend capability: Help and `/`
+  // completion read `commandList`, so this is the one catalog that can hide it
+  // while `agentTeams` is absent. Keep the unfiltered list so a later service
+  // mount restores the row without waiting for a skill-catalog refresh.
+  let commandBase: readonly LocalCommand[] = LOCAL_COMMANDS
+  const publishCommandList = (commands: readonly LocalCommand[], emit = true): void => {
+    state.commandList = annotateCommandCapabilities(
+      withTeamCommandVisibility(commands, teamServiceActive(ctx)),
+      capabilitiesOf(),
+    )
+    if (emit) state.emit()
+  }
   // Annotated from the start: Help and `/` completion read `commandList`
   // before the first skill-catalog refresh publishes a new one, and a command
   // whose capability is missing must never look usable in that window.
-  state.commandList = annotateCommandCapabilities(LOCAL_COMMANDS, capabilitiesOf())
+  publishCommandList(LOCAL_COMMANDS, false)
+  // The team service appears and disappears with its bundle (HMR, a CLI or
+  // Web write). Follow the same `internal/service` signal the team store reads,
+  // so the command catalog and the Help/`/` popup change with it.
+  owner.own(ctx.on('internal/service' as never, ((name: unknown) => {
+    if (name === 'agentTeams') publishCommandList(commandBase)
+  }) as never))
   Object.defineProperty(state, 'autoRecapOnOpen', {
     configurable: true,
     enumerable: true,
@@ -448,13 +468,13 @@ export function attachDshExtensions(
     owner,
     commandService,
     agent: () => binding.agent,
-    cwd: () => state.cwd,
+    cwd: () => sessionWorkingDirectory(state),
     setCommands(commands) {
       // Annotate before publishing: Help and `/` completion both read
       // `commandList`, so a command whose capability is missing says so
       // instead of looking usable and failing on use.
-      state.commandList = annotateCommandCapabilities(commands, capabilitiesOf())
-      state.emit()
+      commandBase = commands
+      publishCommandList(commands)
     },
     commandDescriptions: name => commandTrees?.descriptions(name),
     // A skill gesture typed mid-turn stays immediate (steer at the next step
@@ -501,7 +521,7 @@ export function attachDshExtensions(
   const loadedContext = createLoadedContextRefresher(ctx, {
     owner,
     agent: () => binding.agent,
-    cwd: () => state.cwd,
+    cwd: () => sessionWorkingDirectory(state),
     skillRegistryFor,
     skillViewOptions,
     publish(context) { state.loadedContext = context; state.emit() },
@@ -603,6 +623,13 @@ export function attachDshExtensions(
     messageObserver,
     seedUpstreamRetry,
     retireAttachment: core.input.retireAttachment,
+    onWorkingDirectoryChange: () => {
+      // The 1s poll also re-probes the new directory; starting it here drops
+      // the stale-branch window on a move.
+      core.refreshGitBranch()
+      void refreshLoadedContext()
+      void refreshSkillCommands()
+    },
   })
 
   const sessionAdoption = createSessionAdoption(state, {

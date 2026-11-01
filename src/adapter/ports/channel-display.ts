@@ -116,6 +116,16 @@ export interface StatusBarConfig {
   trajectory: boolean
   /** Idle `? for shortcuts` reminder; shortcut keys remain available when hidden. */
   shortcutHint: boolean
+  /** Footer fields contributed by plugins (`tuiStatus.setField`). Off only
+   *  stops the rendering; plugins keep their registrations. */
+  pluginFields: boolean
+  /** Plugin footer fields as an explicit, ordered list — the per-field layer
+   *  under {@link pluginFields}. `''` shows none; `'*'` (the default) shows
+   *  all of them in their plugin-declared slots and registration order;
+   *  anything else is exactly three `;`-separated groups whose index picks the
+   *  slot (`left-tail; right-head; right-tail`) and whose order picks the
+   *  sequence inside it. A listed key overrides its plugin-declared slot. */
+  pluginFieldsOrder: string
 }
 
 export interface SessionModeSpec {

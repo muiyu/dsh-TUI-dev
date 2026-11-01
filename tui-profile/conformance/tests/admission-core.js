@@ -28,6 +28,7 @@ import {
   registerWorkspace,
 } from './std-modules.js'
 import { registerProfileProtocols, registerTuiContributionExtensions } from '../../protocols/profile-definitions.js'
+import { profileEntriesOf } from './profile-index.js'
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -49,7 +50,9 @@ export const schemas = {
 export const profile = load('registry/registry-0.15.json')
 export const permissionRegistry = load('registry/permissions-0.1.json')
 export const facetApiVersions = profile.facetApiVersions ?? []
-const profileEntries = [...profile.imports, ...profile.definitions]
+// The index sections live in one dependency-free module so the host-side mirror gate
+// can compare them with `registryEntries()` (see profile-index.js; D-4 gap 6).
+const profileEntries = profileEntriesOf(profile)
 export const coordinateKey = value => `${value.apiVersion ?? value.coordinates.apiVersion}#${value.kind ?? value.coordinates.kind}`
 export const familyKey = value => `${(value.apiVersion ?? value.coordinates.apiVersion).split('/')[0]}#${value.kind ?? value.coordinates.kind}`
 export const byCoordinate = new Map(profileEntries.map(entry => [coordinateKey(entry.coordinates), entry]))

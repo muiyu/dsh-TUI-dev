@@ -195,6 +195,8 @@ export type ShortcutActionId =
   | 'continue'
   | 'showAll'
   | 'questionFold'
+  | 'questionDetailUp'
+  | 'questionDetailDown'
   | 'redraw'
   | 'todoFold'
   | 'expandEditor'
@@ -231,12 +233,14 @@ export const SHORTCUT_ACTIONS: readonly ShortcutActionSpec[] = [
   { id: 'contextPanel', defaults: ['ctrl+p'] },
   // 落地页 Continue：alt+r（resume 语义）。占用核对（SHORTCUT_ACTIONS defaults ∪
   // FIXED_RESERVED_COMBOS）：ctrl 系 v/r/g/o/t/a/p/e/l/q/k/b/c/d/u/w/j/left/right/return
-  // 全占，alt 系只有 v/s/z/return/up 在册——alt+r 空闲，且不与输入框抢字母键。
+  // 全占；alt+r 空闲，且不与输入框抢字母键。
   { id: 'continue', defaults: ['alt+r'] },
   { id: 'showAll', defaults: ['ctrl+e'] },
   { id: 'redraw', defaults: ['ctrl+l'] },
   { id: 'todoFold', defaults: ['ctrl+q'] },
   { id: 'questionFold', defaults: ['ctrl+k'] },
+  { id: 'questionDetailUp', defaults: ['alt+up'] },
+  { id: 'questionDetailDown', defaults: ['alt+down'] },
   { id: 'expandEditor', defaults: ['ctrl+shift+e'] },
   // 开屏标语里的"一键 star"：与 `/star`、弹窗按钮同一个动作（gh api PUT）。
   // 用 alt 组合是为了不跟输入框抢字母键。
@@ -385,9 +389,12 @@ export const FIXED_RESERVED_COMBOS: readonly string[] = [
   'ctrl+u', // kill line
   'ctrl+k', // kill to end
   'ctrl+w', // kill word
+  'alt+backspace', // kill word (Option-as-Meta / extended key reporting)
   'ctrl+j', // newline fallback (legacy LF / extended key reporting)
   'ctrl+left', // word jump
   'ctrl+right', // word jump
+  'alt+left', // word jump
+  'alt+right', // word jump
   'ctrl+return', // newline (multi-line input)
   'ctrl+shift+return', // shift+Enter newline (CSI 13;6u) — same editor binding
   'alt+return', // newline fallback on terminals without shift reporting

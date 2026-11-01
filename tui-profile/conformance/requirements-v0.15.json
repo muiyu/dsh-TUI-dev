@@ -23,7 +23,8 @@
       "source": "registry/registry-0.15.json",
       "fixtures": [
         "invalid-plugin-unknown-coordinate.json",
-        "invalid-plugin-optional-no-fallback.json"
+        "invalid-plugin-optional-no-fallback.json",
+        "valid-extension-coordinate-plugin.json"
       ],
       "test": "profile definition closure and fallback policy",
       "evidence": "automated"

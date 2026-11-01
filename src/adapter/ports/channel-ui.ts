@@ -1,5 +1,5 @@
 /** Host-owned in-process Channel contract. No runtime or upstream imports. */
-import type { ChatRow, AgentStatus, TokenUsage, TurnUsageSummary, SessionCostByModel, SubagentCostEntry, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, TrajectoryLane, TrajectorySource, ChannelSelection, AttachedContext, CompactionStatus, ContextOccupancy, ContextBreakdown, TeamView, ChannelCapabilities, ChannelCostReport, ChannelRateLimit, ChannelSessionRef, BackendModeOption, BackendChannelOption, BackendChannelInput } from './channel-view.js'
+import type { ChatRow, AgentStatus, TokenUsage, TurnUsageSummary, TurnOutcome, SessionCostByModel, SubagentCostEntry, NotificationItem, ChannelGoal, TodoPanelItem, LoadedContext, PendingMessage, ChannelSceneMetadata, SubagentState, SubagentControl, BackgroundJobState, JobControl, StagedImageInput, StagedImageHandle, ComposerImageRef, ComposerSubmission, ExternalCommandOutcome, TranscriptImage, ResumeResult, EffortOption, PermissionPresetSnapshot, PresetOption, LlmModelInfo, LlmProviderInfo, SkillInfo, CredentialStatus, AgentViewRow, AgentViewDispatchResult, BackgroundResult, RawTrajEvent, TrajectoryLane, TrajectorySource, ChannelSelection, AttachedContext, CompactionStatus, ContextOccupancy, ContextBreakdown, TeamView, ChannelCapabilities, ChannelCostReport, ChannelRateLimit, ChannelSessionRef, BackendModeOption, BackendChannelOption, BackendChannelInput } from './channel-view.js'
 import type { SpinnerMode, ToolBackground, ScrollGutterMode, PageMarginSetting, StatusBarConfig, SessionModeSpec, SplashFontSetting, JobGroupFoldMode, BrandSetting } from './channel-display.js'
 import type { LocalCommand, CommandCompletion, BalanceResult, FileCandidate, RecapOutcome } from './channel-catalog.js'
 import type { AgentCapabilities } from './channel-capabilities.js'
@@ -142,6 +142,9 @@ export interface ChannelUi {
   readonly cwd: string
   /** Human-facing cwd (remote POSIX path/URI instead of a host alias). */
   readonly displayCwd: string
+  /** Directory the session moved to after it opened (DSH `working_directory`
+   *  tool, worktrees). `cwd` stays the project; undefined = never recorded. */
+  readonly workingDirectory: string | undefined
   /** Current git branch, when the cwd is inside a git worktree. */
   readonly gitBranch: string | undefined
   /** True between turn/start and turn/end — drives the working spinner. */
@@ -187,6 +190,15 @@ export interface ChannelUi {
    *  footer's turn mini-summary can read it while the next turn runs without
    *  mixing the two. Undefined before any turn ended. */
   readonly turnUsage: TurnUsageSummary | undefined
+  /** How the most recently ended turn closed, projected straight from
+   *  `turn.end.reason` on every turn end. Deliberately separate from
+   *  {@link turnUsage}: that ledger is only emitted by a turn that reported
+   *  usage, so a usage-less failed or cancelled turn would otherwise leave
+   *  the PREVIOUS turn's outcome standing (or, on the first turn, nothing at
+   *  all). Cleared when the next turn starts. */
+  readonly turnOutcome: TurnOutcome | undefined
+  /** Live ends since the current binding; excludes replay and survives render batching. */
+  readonly liveTurnEnds: number
   /**
    * Context occupancy — the ONE source of truth for the footer's `ctx` field,
    * the segmented context bar, the working-activity line's `⚠ ctx N%` prefix,
@@ -519,6 +531,11 @@ export interface ChannelUi {
    * holds the row.
    */
   swapDockedForDraft(id: string, draft: { text: string; images?: readonly ComposerImageRef[] }): boolean
+  /** Park texts no backend holds (a /restart carries the previous process's
+   *  queue over) at the pending tail as held, undelivered dock rows, with a
+   *  notice. Nothing sends until the user sends the dock. Returns the count
+   *  held; blank texts are skipped. */
+  holdInputs(texts: readonly string[]): number
   /** Rewind the conversation to a past user message (the double-Esc rewind):
    *  forks the session through that message, swaps in a fresh agent, and
    *  returns the message text for re-editing — or `null` when unwritable.
@@ -748,8 +765,10 @@ export interface ChannelUi {
   /** Render a multi-line local report in the transcript (`/status`,
    *  `/doctor`, …): a `local` row plus one `local-output` row per line.
    *  `lineLimit` overrides the default per-line cell budget for a report
-   *  whose line IS the payload (`/goal`'s objective) so it is not clipped. */
-  pushLocal(title: string, lines: readonly string[], options?: { readonly lineLimit?: number }): void
+   *  whose line IS the payload (`/goal`'s objective) so it is not clipped.
+   *  `preserveWhitespace` keeps leading indentation and blank rows for
+   *  sectioned reports (`/plugin list`); the default flattens each line. */
+  pushLocal(title: string, lines: readonly string[], options?: { readonly lineLimit?: number; readonly preserveWhitespace?: boolean }): void
   /** MCP server/tool status for /mcp: one line per server, or setup guidance. */
   mcpStatus(): string[]
   /** Write the conversation transcript to `dsh-tui-export-<ts>.md` in the

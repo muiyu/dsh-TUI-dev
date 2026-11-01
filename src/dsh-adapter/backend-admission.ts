@@ -19,9 +19,9 @@
  * descriptor chain by itself. Since W-2 (stage C) that chain *is* wired —
  * `Backend` is a host-published contract, the profile pins this family's contract
  * profile by digest and the descriptor publishes the coordinate only on real
- * probe evidence ({@link probeBackendAdmission}) — while the step that reads a
- * mounted bundle's declaration into {@link registerBackend} is still the stage C
- * install chain's work.
+ * probe evidence ({@link probeBackendAdmission}) — and since D-1 the step that
+ * reads a mounted bundle's declaration into {@link registerBackend} is the
+ * boot-time assembly (`backend-assembly.ts`), not the install chain's work.
  *
  * **Published codes.** The contract profile
  * (`tui-profile/registry/contracts/backend-v1alpha1.json`) publishes exactly the

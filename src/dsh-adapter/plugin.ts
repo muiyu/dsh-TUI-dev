@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import React from 'react'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -10,6 +11,7 @@ import Schema from '@deepseek-ai/schemastery'
 import { Config } from './index.js'
 import { configValues, createSettingsScope, resolveSettingsNamespace, type RuntimeConfig } from './compat/settings.js'
 import { createChannel } from './channel.js'
+import { channelOwnerCurrent } from './channel/owner.js'
 import { createDshSession } from './backend/session.js'
 import { createTuiSettingsService, type DelegateSettings } from './tui-settings.js'
 import { EDITABLE_CONFIG_KEYS } from '../settings/definitions.js'
@@ -30,8 +32,12 @@ import { registerTuiChannel } from '../adapter/channel/host-registry.js'
 import { createChildStderrReporter, installChildStderrGuard } from './childStderr.js'
 import { removeClipboardImageDir } from '../utils/clipboard.js'
 import { appendCrashLog, serializeCrashDetail, unserializableCrashDetail, type CrashDetail } from '../utils/crashDetail.js'
+import { pluginManagerOf, type PluginManagerView } from './plugin-manager.js'
 import { logForDebugging } from '../utils/debug.js'
 import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
+import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
+import { getTerminalFocused } from '../ink/terminal-focus-state.js'
+import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore, bindQuestionStore } from './questions.js'
 import { prepareQuestionAnswerer } from './questions-answerer.js'
@@ -55,13 +61,14 @@ import { clearResumeTarget, resumeTargetFromArgv, stripResumeArgs, writeResumeTa
 import { cmdlineArgsOf, initialPromptFromCmdlineArgs } from './startup-args.js'
 import { readHomePrefs } from '../homePrefs.js'
 import { handoffEventTag, formatHandoffNotice } from '../handoffEvents.js'
+import { adoptHeldInputs, heldInputsResumeCommand, takeHeldInputs, writeHeldInputs } from '../heldInputs.js'
 import { armFirstFrameAck, beginHandoffAck, handoffAttemptId, ownsAltScreenExit } from '../handoffAck.js'
 import { DSH_BACKEND_ID, HOST_NOTICE_ENV, KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, parseBackendId, readKernelPrefs, resolveRememberedBackend, resolveResumeTarget, writeKernelPrefs, type KernelBackendId } from '../kernelPrefs.js'
 import { shouldOfferOnboarding } from '../onboardingPrefs.js'
 import { resolveSessionCwd } from '../utils/workspaceRoot.js'
 import { LAUNCH_PROMPT_SENT_ENV, beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice, writeLastRunRecord, type TuiRestartOptions } from '../update.js'
 import { getLang, isLang, resolveStartupLang, setLang, t, writeLangPref } from '../i18n.js'
-import { applyBtwContextBudget, applyBtwContextTurns, applyCodeFrameStyle, applyCompanionSkin, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, applyPageMargin, applySidePanelOpen, applySidePanelRatio, applySidePanelSplitEnabled, BTW_CONTEXT_BUDGET_MAX, BTW_CONTEXT_BUDGET_MIN, BTW_CONTEXT_TURNS_MAX, BTW_CONTEXT_TURNS_MIN, DEFAULT_PAGE_MARGIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, isPageMarginMode, normalizeJobGroupFold, normalizePageMargin, normalizeScrollGutter, normalizeSidePanelPanels, normalizeSidePanelRatio, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, resolveMathRendering, SIDE_PANEL_ID_PATTERN, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { applyBtwContextBudget, applyBtwContextTurns, applyCodeFrameStyle, applyCompanionSkin, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, applyPageMargin, applySidePanelOpen, applySidePanelPanels, applySidePanelRatio, applySidePanelSplitEnabled, ALL_SIDE_PANELS, BTW_CONTEXT_BUDGET_MAX, BTW_CONTEXT_BUDGET_MIN, BTW_CONTEXT_TURNS_MAX, BTW_CONTEXT_TURNS_MIN, DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, isPageMarginMode, normalizeJobGroupFold, normalizePageMargin, normalizeScrollGutter, normalizeSidePanelPanels, normalizeSidePanelRatio, normalizePluginFieldsOrder, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, parsePluginFieldsOrder, parseSidePanelPanels, resolveMathRendering, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import {
   draftComboConflicts,
   effectiveComboString,
@@ -89,11 +96,11 @@ import { getHostThemes, type TuiThemeHost, type TuiThemeRuntime } from './themes
 import type { DshAuthService } from './oauth/service.js'
 import { attachSessionToWorkspace } from './workspace.js'
 import { createLocalWorkspaceRuntime, getHostWorkspaceRuntime } from './workspaces.js'
-import { getHostSettingsSections, getLocalSettingsSectionsHost, type TuiSettingsField, type TuiSettingsSectionsRuntime } from './settings-sections.js'
-import { compositionRoot, withHostRootCapability } from './host-access.js'
+import { trackHostSettingsSection, type TuiSettingsField, type TuiSettingsFieldWrite, type TuiSettingsSection } from './settings-sections.js'
+import { compositionRoot, outsideActivation, withHostRootCapability } from './host-access.js'
+import { createRowAttachment } from './row-attachment.js'
 import { armAdmissionLoader } from './admission-loader.js'
 import { assembleBackendsFromProfile } from './backend-assembly.js'
-import { applyConfiguredSidePanelPanels, applySidePanelPanelsFromSettings } from './panels.js'
 import { disposeRootSettled } from './root-dispose.js'
 import { render, ThemeProvider, AlternateScreen } from '../ui.js'
 import { PageMargin } from '../components/PageMargin.js'
@@ -101,8 +108,9 @@ import { normalizeSplashFont } from '../components/splashFonts.js'
 import { normalizeBrandSetting, resolveBrand, setActiveBrand } from '../branding.js'
 import { SETTING_GROUPS, SHORTCUT_FIELD_META, settingField } from '../settings/definitions.js'
 import instances from '../ink/instances.js'
+import { getShutdownInput, type ShutdownInput } from '../ink/shutdown-input.js'
 import { cursorMove, DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from '../ink/termio/csi.js'
-import { DBP, DFE, DISABLE_MOUSE_TRACKING, EXIT_ALT_SCREEN, SHOW_CURSOR } from '../ink/termio/dec.js'
+import { DBP, DFE, DISABLE_MOUSE_TRACKING, ESU, EXIT_ALT_SCREEN, SHOW_CURSOR } from '../ink/termio/dec.js'
 import { CLEAR_ITERM2_PROGRESS, CLEAR_TAB_STATUS, supportsTabStatus, wrapForMultiplexer } from '../ink/termio/osc.js'
 import { addProcessErrorAbsorber, fatalReasonForExit, registerProcessGuardFatalSink } from '../ink/update-overflow-guard.js'
 import { CHANNEL_UI_LIFETIME_ENDED } from '../adapter/channel/ui.js'
@@ -217,10 +225,197 @@ export interface RuntimeApplyOptions {
   readonly exitSeam?: ProcessExitSeam
 }
 
+/** Where a Windows task-completion announcement delivers, and where it falls back to. */
+export interface TaskCompletionDelivery {
+  /** Live inventory from the running profile; installed packages alone do not own events. */
+  pluginManager?: Pick<PluginManagerView, 'listPlugins'>
+  /** Live owner/settings permission for pending native dispatch and fallback. */
+  canDispatch?: () => boolean
+  /** Hand the completion to the native toast transport (D8 keeps the dedup inside it). */
+  toast(input: WindowsToastInput): Promise<WindowsToastResult>
+  /** The terminal bell, used when the native transport is unavailable. */
+  terminal(title: string, message: string): void
+}
+
+/** The two live task-notification settings both delivery paths read. */
+export interface TaskNotificationSettings {
+  /** When a completion is announced at all: `off` suppresses it entirely. */
+  condition: TaskNotifications
+  /** How it is delivered: the native toast here, a terminal sequence or the bell there. */
+  method: NotificationMethod
+}
+
+/** The terminal notifier the host configures, as `createTerminalNotifier` returns it. */
+export type TerminalNotifier = ReturnType<typeof createTerminalNotifier>
+
+/** The live task-notification settings and their one writer. */
+export interface TaskNotificationSettingsHandle {
+  /** The current values; the toast branch and the terminal fallback read these. */
+  readonly settings: TaskNotificationSettings
+  /**
+   * Adopt a new condition/method: the terminal notifier and the toast branch
+   * both read these, so one writer keeps them in step.
+   * @param condition - The new condition, or undefined for the default.
+   * @param method - The new method, or undefined for the default.
+   */
+  configure(condition: TaskNotifications | undefined, method: NotificationMethod | undefined): void
+}
+
+/**
+ * Create the live task-notification settings around a notifier.
+ *
+ * The notifier holds the values for the terminal path, and the Windows branch
+ * needs the same two before it can decide whether to spawn anything. One writer
+ * keeps them in step - `applyDisplay` is the second caller, for a live /settings
+ * edit.
+ * @param notifier - The terminal notifier to configure.
+ * @param initial - The values this launch starts with.
+ * @returns The settings and the single function that changes them.
+ */
+export function createTaskNotificationSettings(
+  notifier: TerminalNotifier,
+  initial: TaskNotificationSettings,
+): TaskNotificationSettingsHandle {
+  const settings: TaskNotificationSettings = { ...initial }
+  return {
+    settings,
+    configure(condition, method) {
+      settings.condition = condition ?? 'unfocused'
+      settings.method = method ?? 'auto'
+      notifier.configure(condition, method)
+    },
+  }
+}
+
+/**
+ * Ring the terminal for a completion the host's gate already approved.
+ *
+ * The gate asks whether the terminal is focused; this port runs after the toast's
+ * await, which is up to 30 s of PowerShell. Asking the focus question a second
+ * time here would drop the bell for a user who came back to the terminal in that
+ * window - while the log had already reported it rung (AC-5). The decision
+ * travels in instead. `notify()` is synchronous, so the override covers exactly
+ * this call.
+ * @param notifier - The terminal notifier the host configured.
+ * @param settings - The live settings the decision was taken from.
+ * @param title - The localized title.
+ * @param message - The single-line summary; empty rings for the title alone.
+ */
+export function ringTaskCompletion(notifier: TerminalNotifier, settings: TaskNotificationSettings, title: string, message: string): void {
+  // A later explicit off still cancels sound; merely regaining focus does not.
+  notifier.configure(settings.condition === 'unfocused' ? 'always' : settings.condition, 'bel')
+  try {
+    notifier.notify(title, message)
+  } finally {
+    notifier.configure(settings.condition, settings.method)
+  }
+}
+
+/**
+ * Show one task-completion toast and answer for what it did.
+ *
+ * Exactly one answer reaches the terminal path: `unavailable` rings the bell
+ * (AC-5), because the alternative is a notification the user never learns
+ * about. `shown` is already delivered and `yielded` belongs to the external
+ * notifier (D8/AC-6) — ringing after either would remind the user twice.
+ *
+ * The transport is a parameter so the regression can drive all three answers
+ * without a toast, a registry write or a child process.
+ * @param title - The localized title.
+ * @param message - The single-line summary; empty shows the title alone.
+ * @param backendId - The session that completed; a DSH plugin only covers DSH events.
+ * @param delivery - The toast port, and the terminal path to fall back to.
+ */
+export async function deliverTaskCompletionOnWindows(
+  title: string,
+  message: string,
+  backendId: string,
+  delivery: TaskCompletionDelivery,
+): Promise<void> {
+  let externalNotifierActive = false
+  if (backendId === 'dsh' && delivery.pluginManager !== undefined) {
+    try {
+      const plugins = await delivery.pluginManager.listPlugins()
+      externalNotifierActive = plugins.some(plugin => plugin.enabled && plugin.fiberPhase === 'active'
+        && ['@baobaolaodie/cc-dsh-notifier', 'cc-dsh-notifier'].includes(plugin.moduleName))
+    } catch {
+      logForDebugging('external notifier inventory unavailable; using the built-in Windows notification')
+    }
+  }
+  const result = await delivery.toast({
+    title,
+    message,
+    externalNotifierActive,
+    canDispatch: delivery.canDispatch,
+  })
+  if (result.status !== 'unavailable' || delivery.canDispatch?.() === false) return
+  // AC-5 wants the bell, not a silent loss - and the reason is what makes the
+  // pair "toast missing + bell rang" explainable afterwards. Ring first, then
+  // report: the port rings for a completion the gate already approved, and a line
+  // written ahead of the action is how the fallback came to log a bell that a
+  // second look at the focus had eaten.
+  const cause = result.detail === undefined ? result.reason : `${result.reason}: ${result.detail}`
+  delivery.terminal(title, message)
+  logForDebugging(`windows toast unavailable (${cause}); using the terminal fallback`)
+}
+
+/**
+ * The production toast port. The Windows module is imported on first use and
+ * never at load time, so this path does not pull it in on a host that never
+ * delivers a toast. A load that fails answers like any other unavailable
+ * transport instead of throwing: this path is fire-and-forget, and the caller
+ * still has the bell.
+ */
+async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastResult> {
+  try {
+    const { notifyWindowsToast } = await import('../ink/terminal-notification-windows.js')
+    return await notifyWindowsToast(input)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    logForDebugging(`windows toast transport failed to load (${detail})`)
+    return { status: 'unavailable', reason: 'unexpected', detail }
+  }
+}
+
 export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, configOwner: Context = ctx, runtimeOptions: RuntimeApplyOptions = {}): Promise<void> {
   const config = configValues<Config>(runtimeConfig)
   const taskNotifier = createTerminalNotifier(process.stdout)
-  taskNotifier.configure(config.taskNotifications, config.notificationMethod)
+  const { settings: notificationSettings, configure: configureTaskNotifications } = createTaskNotificationSettings(taskNotifier, {
+    condition: config.taskNotifications ?? 'unfocused',
+    method: config.notificationMethod ?? 'auto',
+  })
+  configureTaskNotifications(config.taskNotifications, config.notificationMethod)
+  /**
+   * Whether a task completion is announced at all: the one gate, asked before
+   * the Windows transport so a suppressed notification never costs a PowerShell
+   * process, and so a delivered toast never also rings the bell. The Windows
+   * fallback re-enters through `ringTaskCompletion`, which carries this answer
+   * instead of asking the focus question again after the awaits. Explicit off or
+   * owner release revokes pending dispatch; an already started host is not recalled.
+   */
+  const taskCompletionAlertsEnabled = (): boolean =>
+    process.stdout.isTTY === true
+    && notificationSettings.condition !== 'off'
+    && !(notificationSettings.condition === 'unfocused' && getTerminalFocused())
+  /**
+   * Announce a finished task: the channel's `onTaskComplete` payload and gate,
+   * with the Windows method resolved first (`auto` picks the toast there, D2).
+   */
+  const announceTaskCompletion = (preview: string | undefined, backendId: string): void => {
+    if (!taskCompletionAlertsEnabled()) return
+    const title = t('task-complete-notification')
+    const message = preview ?? ''
+    if (resolveNotificationMethod(notificationSettings.method, process.platform) !== 'windows') {
+      taskNotifier.notify(title, message)
+      return
+    }
+    void deliverTaskCompletionOnWindows(title, message, backendId, {
+      pluginManager: pluginManagerOf(ctx),
+      canDispatch: () => channelOwnerCurrent(rawChannel) && notificationSettings.condition !== 'off',
+      toast: showWindowsToast,
+      terminal: (fallbackTitle, fallbackMessage) => ringTaskCompletion(taskNotifier, notificationSettings, fallbackTitle, fallbackMessage),
+    })
+  }
   // /restart handoff diagnosis: the replacement process is marked by env and
   // logs its boot progress to ~/.dsh-tui/restart.log (ordinary launches stay
   // silent). First line lands before anything in this function can throw.
@@ -414,7 +609,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // The host-level tool mount above is intentional for the TUI and for user
     // presets, but the official Minimal preset is a single-tool trajectory (one
     // persistent shell: bash on POSIX, pwsh on Windows). Filter only that preset
-    // at the final assembly boundary. Reading the session on every assembly also
+    // (plus create_worktree for liangshen, presets.ts) at the final assembly
+    // boundary. Reading the session on every assembly also
     // makes blank-session /preset switches and resumed sessions behave correctly.
     // Agent Teams is decided at the same boundary: presets keep their legacy
     // delegation rows, and a request that carries `spawn_teammate` drops
@@ -917,7 +1113,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // channel's own settings reads look the section up by it.
     settingsNs: tuiSettingsNs,
     onTaskComplete: preview => {
-      if (!shadow) taskNotifier.notify(t('task-complete-notification'), preview)
+      if (!shadow) announceTaskCompletion(preview, rawChannel.sessionRef.backendId)
     },
     settingsService: tuiSettings,
     // The backend reports its model with its first turn (`system/init`);
@@ -1094,9 +1290,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   applySidePanelSplitEnabled(config.sidePanel?.splitEnabled)
   applySidePanelOpen(config.sidePanel?.open)
   applySidePanelRatio(config.sidePanel?.ratio)
-  // Registered ids survive: on the profile path a third-party row may have
-  // registered its panel before this row applied (./panels.ts).
-  applyConfiguredSidePanelPanels(config.sidePanel?.panels)
+  // The stored value only: `*` (the default) lets the registry supply the
+  // plugin panels, so no registration-time merge is needed (issue #1662).
+  applySidePanelPanels(config.sidePanel?.panels)
   applyCompanionSkin(config.companion?.skin)
   applyBtwContextTurns(config.btw?.contextTurns)
   applyBtwContextBudget(config.btw?.contextBudget)
@@ -1187,7 +1383,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // Same no-default rule: applyDisplay resolves `?? config.smoothStreaming ?? true`.
         smoothStreaming: Schema.boolean(),
         taskNotifications: Schema.union(['off', 'unfocused', 'always']),
-        notificationMethod: Schema.union(['auto', 'osc9', 'bel']),
+        // Must mirror Config's union (`src/dsh-adapter/index.ts`): a method
+        // missing here is rejected by /settings and never reaches the runtime.
+        notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
         // Same no-default rule: applyDisplay resolves `?? config.mermaidDiagrams ?? true`.
         mermaidDiagrams: Schema.boolean(),
         // Code-frame shape; unset keeps the light rail frame.
@@ -1225,6 +1423,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
           trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
           shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
+          pluginFields: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginFields),
+          pluginFieldsOrder: Schema.string().default(DEFAULT_STATUS_BAR.pluginFieldsOrder),
         }).default({ ...DEFAULT_STATUS_BAR }),
         // Side-panel preferences. No schema defaults on purpose (same rule as
         // foldTerminalCommand/expandEditor above): a default here would come
@@ -1399,9 +1599,6 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       }
       bootedTerminalImages = lastBootedTerminalImages ?? value.terminalImages ?? config.terminalImages ?? true
     }
-    /** False only during the boot application below: a registered panel absent
-     *  from its CSV is not a user removal (./panels.ts). */
-    let settingsEditsLive = true
     // The /settings language field writes `lang` through the settings
     // service (user layer): apply it live and mirror it to lang.json so
     // the /lang command and next-boot resolution agree. DSH_TUI_LANG
@@ -1432,7 +1629,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setPromptSessionLabel(value.promptSessionLabel ?? config.promptSessionLabel ?? false)
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
-      taskNotifier.configure(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
+      configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
       applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))
@@ -1447,10 +1644,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       applySidePanelSplitEnabled(value.sidePanel?.splitEnabled ?? config.sidePanel?.splitEnabled)
       applySidePanelOpen(value.sidePanel?.open ?? config.sidePanel?.open)
       applySidePanelRatio(value.sidePanel?.ratio ?? config.sidePanel?.ratio)
-      // A registered panel missing from a live edit was unticked in /settings.
-      const panelsCsv = value.sidePanel?.panels ?? config.sidePanel?.panels
-      if (settingsEditsLive) applySidePanelPanelsFromSettings(panelsCsv)
-      else applyConfiguredSidePanelPanels(panelsCsv)
+      // The stored value only: registration never rewrites it, so every apply
+      // (boot or live, same CSV or a new one) is idempotent (issue #1662).
+      applySidePanelPanels(value.sidePanel?.panels ?? config.sidePanel?.panels)
       applyCompanionSkin(value.companion?.skin ?? config.companion?.skin)
       applyBtwContextTurns(value.btw?.contextTurns ?? config.btw?.contextTurns)
       applyBtwContextBudget(value.btw?.contextBudget ?? config.btw?.contextBudget)
@@ -1478,12 +1674,20 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // re-apply — unrelated settings edits must not disturb a live /effort
     // choice mid-session.
     let lastEffortDefault: string | null | undefined = undefined
+    /** True only while boot's first settings snapshot is applied: a capability
+     *  backend restores its own effort at boot, and that first apply must not
+     *  overwrite it (#1688). */
+    let bootApplication = false
     const applyEffortDefault = (value: SettingsValue): void => {
       const next = value.effortDefault ?? null
       if (next === lastEffortDefault) return
-      lastEffortDefault = next
       const level = next === null || next === 'auto' ? undefined : next
-      channel.setDefaultEffort(level)
+      // Capability backends restore their own effort. Boot is not a live edit:
+      // Auto and resumed sessions keep that selection until the user changes it.
+      const preserve = bootApplication && backendStart !== undefined && (level === undefined || backendStart.resumedSessionId !== undefined)
+      if (!preserve && backendStart !== undefined && !channel.ready) { lastEffortDefault = undefined; return }
+      if (!preserve && (channel.setDefaultEffort(level) as unknown) === false) { lastEffortDefault = undefined; return }
+      lastEffortDefault = next
     }
     const apply = (next: SettingsValue): void => {
       applyLayout(next)
@@ -1522,9 +1726,26 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       notifyChannel(t('settings-fullscreen-migrated'), { color: 'warning' })
     }
     const { fullscreen: staleFullscreen, ...migratedSettings } = bootSettings
-    settingsEditsLive = false
+    bootApplication = true
     apply(fullscreenMigration === 'unset' ? migratedSettings : bootSettings)
-    settingsEditsLive = true
+    bootApplication = false
+    if (backendStart !== undefined) settingsCtx.effect(() => {
+      let active = true
+      let generation = channel.ready ? channel.agentBindingGeneration : undefined
+      const stop = channel.subscribe(() => {
+        if (!channel.ready || (lastEffortDefault !== undefined && generation === channel.agentBindingGeneration)) return
+        // Adoption publishes several synchronous updates before its binding generation.
+        queueMicrotask(() => {
+          if (!active || !channel.ready) return
+          if (generation !== undefined && generation !== channel.agentBindingGeneration) {
+            lastEffortDefault = scope.get().effortDefault ?? null
+          }
+          generation = channel.agentBindingGeneration
+          if (lastEffortDefault === undefined) applyEffortDefault(scope.get())
+        })
+      })
+      return () => { active = false; stop() }
+    })
     let lastTerminalImages = bootSettings.terminalImages ?? config.terminalImages ?? true
     let lastLaunchpad = bootSettings.launchpad ?? config.launchpad ?? true
     settingsCtx.effect(() => scope.watch(next => {
@@ -1583,15 +1804,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // dsh-tui-* host-seam insert list right after load (issue #557), which
   // left this registration silently skipped and /settings read-only.
   // channel.ts reads through the same fallback, so both sides meet in the
-  // same registry either way.
-  // The in-process DSH kernel registers into the local host first and moves
-  // the section to the composition's service once it exists.
-  let rehomeSettingsSection = (): void => undefined
+  // same registry either way — but which registry that is can still change
+  // after this registration: the service row may activate later, or reload
+  // into an empty state. trackHostSettingsSection follows it, so the section
+  // never strands in the registry /settings stopped reading.
   {
-    let settingsSections = getHostSettingsSections(
-      ctx.get('tuiSettingsSections') as TuiSettingsSectionsRuntime | undefined,
-    ) ?? getLocalSettingsSectionsHost(ctx)
-    const tuiSection: Parameters<typeof settingsSections.register>[0] = {
+    const tuiSection: TuiSettingsSection = {
       ns: tuiSettingsNs,
       title: 'dsh-tui',
       groups: [...SETTING_GROUPS],
@@ -1730,11 +1948,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
         {
           ...settingField('effortDefault'),
+          optionsSource: 'effort',
           format(value: unknown): string {
             // Unset in settings.yaml: show what a boot would actually start
             // on (the persisted /effort choice → the cordis effort default)
             // instead of a misleading blank.
-            if (value === undefined || value === null || value === 'auto') {
+            if (value === undefined || value === null) {
               return readEffortPref() ?? config.effort ?? 'auto'
             }
             return String(value)
@@ -1796,6 +2015,28 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           ...settingField('statusBar.shortcutHint'),
         },
         {
+          ...settingField('statusBar.pluginFields'),
+        },
+        {
+          ...settingField('statusBar.pluginFieldsOrder'),
+          // An empty draft means "show none" here, not the editor's default
+          // "clear" (which would fall back to `*` and silently re-show every
+          // field). `*` stays reachable by typing it, and an illegal shape
+          // (`a`, `a;b`, a duplicate key) blocks the save instead of being
+          // normalized into something the user did not ask for.
+          parse(text: string): TuiSettingsFieldWrite | undefined {
+            return parsePluginFieldsOrder(text).mode === 'invalid'
+              ? undefined
+              : { kind: 'set', value: normalizePluginFieldsOrder(text) }
+          },
+          // Unset in the user layer: show the value the footer actually uses
+          // (the schema default, `*`) instead of a blank row that would read
+          // as "none" next to the all-unchecked boxes.
+          format(value: unknown): string {
+            return normalizePluginFieldsOrder(value)
+          },
+        },
+        {
           ...settingField('sidePanel.splitEnabled'),
           format(value: unknown): string {
             // Unset in the user layer: the effective default is on.
@@ -1830,22 +2071,27 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
         {
           ...settingField('sidePanel.panels'),
-          placeholder: DEFAULT_SIDE_PANEL_IDS,
+          placeholder: ALL_SIDE_PANELS,
           format(value: unknown): string {
-            // Unset in the user layer: show the effective list.
-            return typeof value === 'string' && value.trim() !== ''
-              ? value
-              : config.sidePanel?.panels ?? DEFAULT_SIDE_PANEL_IDS
+            // Project what the store actually uses: a hand-edited value with
+            // an unusable token must not read differently here than it does
+            // in the PanelBar, so it is normalized exactly like the store
+            // normalizes it. Unset in the user layer: the effective config
+            // value (`*` by default), which the picker reads as "everything
+            // checked".
+            return normalizeSidePanelPanels(
+              typeof value === 'string' && value.trim() !== '' ? value : config.sidePanel?.panels,
+            )
           },
           parse(text: string) {
-            const draft = text.trim()
-            if (draft === '') return { kind: 'clear' }
-            // Strict gate: every token must be a well-formed panel id. The
-            // store would drop a typo silently, so a draft that does not
-            // round-trip is refused instead of saved as something else.
-            const tokens = draft.split(',').map(token => token.trim().toLowerCase()).filter(token => token !== '')
-            if (tokens.length === 0 || tokens.some(token => !SIDE_PANEL_ID_PATTERN.test(token))) return undefined
-            return { kind: 'set', value: normalizeSidePanelPanels(draft) }
+            const parsed = parseSidePanelPanels(text)
+            if (parsed.mode === 'empty') return { kind: 'clear' }
+            if (parsed.mode === 'all') return { kind: 'set', value: ALL_SIDE_PANELS }
+            // Strict gate: a malformed token (or a list embedding `*`, or a
+            // temporary address no later run could honour) is refused instead
+            // of saved as something else.
+            if (parsed.mode === 'invalid') return undefined
+            return { kind: 'set', value: parsed.ids.join(',') }
           },
         },
         {
@@ -1920,15 +2166,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
       ],
     }
-    let unregister = settingsSections.register(tuiSection)
-    ctx.effect(() => () => { unregister() })
-    rehomeSettingsSection = () => {
-      const service = getHostSettingsSections(ctx.get('tuiSettingsSections') as TuiSettingsSectionsRuntime | undefined)
-      if (service === undefined || service === settingsSections) return
-      unregister()
-      settingsSections = service
-      unregister = service.register(tuiSection)
-    }
+    const disposeSection = trackHostSettingsSection(ctx, tuiSection)
+    ctx.effect(() => () => { disposeSection() })
   }
   // DSH approval seam: the permission layer asks ApprovalService.request(),
   // which dispatches an `approval/request` waterfall. With no answerer the
@@ -1982,6 +2221,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // The standalone entry has no `ctx.cmdlineArgs` (its argv is the app's); a
   // replacement keeps the arguments but the first process sent their prompt.
   const initialPrompt = launchPromptSent ? '' : initialPromptFromCmdlineArgs(cmdlineArgs ?? process.argv.slice(2))
+  // The queue a /restart carried over: held, never auto-sent (heldInputs.ts).
+  const stopHeldInputs = adoptHeldInputs(channel)
+  if (stopHeldInputs !== undefined) ctx.effect(() => stopHeldInputs, 'dsh-tui held inputs after startup')
   if (initialPrompt) {
     // A placeholder session refuses sends and nothing replays them after
     // adoption: hold the prompt until the channel is ready.
@@ -2170,13 +2412,20 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           })
         }
         refreshLastRunRecord()
+        // The queue dies with this process (the kernel records it canceled);
+        // the replacement parks the same texts as held dock rows (#1651).
+        const heldEnv = writeHeldInputs(channel.pending.map(item => item.text))
         void finishExit(
           ctx,
           instance,
           bootedFullscreen,
-          t('restart-starting'),
+          // This line is the one the user actually sees before the terminal is
+          // handed over (the composer's toast dies with the unmount): a
+          // mid-turn restart must say that the running turn is interrupted,
+          // not promise a clean resume.
+          t(channel.working ? 'restart-during-turn' : 'restart-starting'),
           undefined,
-          () => runRestart(ctx, profile, handoffSessionId(), handoffHint, { kernel: backendChoice }, exitSeam),
+          () => runRestart(ctx, profile, handoffSessionId(), handoffHint, { kernel: backendChoice, env: heldEnv }, exitSeam),
         )
         return
       }
@@ -2444,12 +2693,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     onPluginManage: createPluginManageEntry(ctx, {
       profileName: profile ?? resolveDshProfileName(),
     }),
-    // `/team [status] | on | off`: the Agent Teams bundle through the same
-    // lifecycle flow (team-mode.ts).
+    // `/team [status]`: the live team report (team-mode.ts). The bundle switch
+    // is `/plugin enable|disable`, which shares the lifecycle flow.
     onTeamCommand: createTeamCommandEntry(ctx, {
       profileName: profile ?? resolveDshProfileName(),
-      // The host reports `unknown` when it has no version: read the installed one.
-      kernelVersion: entrySlot?.kernelVersion === 'unknown' ? undefined : entrySlot?.kernelVersion,
     }),
     kernelPinned: backendPinned,
     // Only a `dsh --profile <name>` launch has a profile installation for
@@ -2650,10 +2897,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   }
   /**
    * Services composed after the mount: re-read what the screen took as values
-   * at mount (Chat's stores, theme host, toast sink, /settings section).
+   * at mount (Chat's stores, theme host, toast sink). The /settings section
+   * follows its registry on its own (trackHostSettingsSection).
    */
   const refreshHostServices = (): void => {
-    rehomeSettingsSection()
     bindToastSink()
     if (!exited) instance?.rerender(buildTree())
   }
@@ -2684,6 +2931,33 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       } catch {
       }
     }
+    // The row's seams (presets, ask_user, approvals, the assembly filters)
+    // live on the row and unload with it: a row that comes back mounts them again.
+    const rowAttachment = createRowAttachment({
+      closed: () => compositionFailed || exited,
+      ready: () => channel.ready,
+      mountSeams: async (dshCtx) => {
+        await installPresets(dshCtx)
+        const seams = mountDshQuestionSeams(dshCtx)
+        if (seams.notice !== undefined) notifyChannel(seams.notice, { color: 'error' })
+        if (seams.registration.kind === 'waterfall') seams.registration.register(channel)
+        mountDshApprovals(dshCtx)
+        refreshHostServices()
+      },
+      readConfig: (rowRuntimeConfig) => { rowFacts.config = configValues<Config>(rowRuntimeConfig as RuntimeConfig<Config>) },
+      ended: () => channel.status === 'disposed',
+      // The resume path reopens the session on the entry's own context, so
+      // a later unload of the row can no longer take the agent along. It
+      // runs as the entry's action: the row's activation only triggered it.
+      reopen: async () => {
+        const result = await outsideActivation(() => channel.resumeTo(channel.sessionId))
+        if (result.ok) notifyChannel(t('session-reattached'))
+      },
+      failed: (error) => {
+        logForDebugging(`dsh-tui: reopening the session after its row came back failed (${error instanceof Error ? error.message : String(error)})`)
+      },
+    })
+    entrySlot.reattachDsh = rowAttachment.reattach
     entrySlot.attachDsh = async (rowCtx, rowRuntimeConfig) => {
       const dshCtx = rowCtx as Context
       // The composition failed (its row is on screen), or the process is
@@ -2692,12 +2966,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       try {
         const rowConfig = configValues<Config>(rowRuntimeConfig as RuntimeConfig<Config>)
         rowFacts.config = rowConfig
-        await installPresets(dshCtx)
-        const seams = mountDshQuestionSeams(dshCtx)
-        if (seams.notice !== undefined) notifyChannel(seams.notice, { color: 'error' })
-        if (seams.registration.kind === 'waterfall') seams.registration.register(channel)
-        mountDshApprovals(dshCtx)
-        refreshHostServices()
+        await rowAttachment.mount(dshCtx)
         const rowRoute = { provider: rowConfig.provider, model: rowConfig.model }
         // The same startup/deployment split the plugin's own boot makes (issue #67).
         const { startupRoute: rowStartupRoute, deploymentRoute: rowDeploymentRoute } = startupRoutes(dshCtx, rowRoute)
@@ -2715,7 +2984,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           const created = await openOnRow(undefined, { cwd })
           await takeOpened(created)
           refreshLastRunRecord()
-          return createDshSession(dshCtx, { agent: created.agent, handle: created.handle })
+          return createDshSession(dshCtx, { agent: created.agent, handle: created.handle }, { screenOutlivesContext: true })
         }
         // The entry mounted on rebuilt defaults: the row's own `workspace` /
         // `cwd` decide the session directory, with `apply`'s precedence. A
@@ -2737,7 +3006,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           ? undefined
           : rowConfig.sessionId ?? resumeTargetFromArgv(cmdlineArgsOf(dshCtx) ?? process.argv.slice(2))
         const opened = await openOnRow(rowSessionId, startupMeta)
-        const session = createDshSession(dshCtx, { agent: opened.agent, handle: opened.handle })
+        const session = createDshSession(dshCtx, { agent: opened.agent, handle: opened.handle }, { screenOutlivesContext: true })
         // The composition failed while this opened: close the unadoptable session.
         if (compositionFailed) {
           await session.dispose().catch(() => undefined)
@@ -3190,8 +3459,13 @@ export async function finishExit(
   notice: string | undefined,
   stderrNotice: string | undefined,
   done: () => void,
-  options: { keepAltScreen?: boolean } = {},
+  options: {
+    keepAltScreen?: boolean
+    /** Explicit renderer lease for legacy wrappers that replace unmount(). */
+    shutdownInput?: ShutdownInput
+  } = {},
 ): Promise<void> {
+  const input = options.shutdownInput ?? getShutdownInput(instance)
   try {
     // Resolve the Ink runtime twice: the instances map is keyed by stdout
     // identity, so a replaced/overridden stdout misses it; the render()
@@ -3199,7 +3473,10 @@ export async function finishExit(
     // a missed lookup skipped detachForShutdown, leaving the stdin pump,
     // TTY handlers and querier alive so the self-heal probe re-wrote
     // ENABLE_MOUSE_TRACKING after DISABLE_MOUSE_TRACKING had been sent).
-    const fromMap = readInkShutdownState(instances.get(process.stdout))
+    const mapped = instances.get(input?.stdout ?? process.stdout)
+    const fromMap = input === undefined || mapped?.shutdownInput === input
+      ? readInkShutdownState(mapped)
+      : undefined
     const fromHandle = instance === undefined ? undefined : readInkShutdownState(instance)
     // A handle that exposes neither detach hook is not an Ink runtime we can
     // latch (e.g. the fake render handles in shutdown regressions) — treat it
@@ -3246,6 +3523,7 @@ export async function finishExit(
     //    first frame, and the old process will close the alternate screen.
     const exitAlt = fullscreen && !(options.keepAltScreen === true) && ownsAltScreenExit() ? EXIT_ALT_SCREEN : ''
     const cleanup = [
+      ESU,
       exitAlt,
       cursor,
       DISABLE_MOUSE_TRACKING,
@@ -3260,7 +3538,11 @@ export async function finishExit(
     ].join('')
     const suffix = notice === undefined ? '' : `${notice}\n`
     const restoreFrame = options.keepAltScreen === true ? '\x1b[2J\x1b[H' : ''
-    await writeStream(process.stdout, `${restoreFrame}${cleanup}\r\n${suffix}`)
+    // A replacement may already own the terminal. Its modes and frame must
+    // survive old-root disposal; a stale exit notice also belongs to that root.
+    if (input?.ownsInput() !== false) {
+      await writeStream(input?.stdout ?? process.stdout, `${restoreFrame}${cleanup}\r\n${suffix}`)
+    }
     // Re-drain AFTER the cleanup sequences have landed (#507): terminal
     // replies and mouse packets already in flight when the exit started
     // keep arriving while cleanup is being written — the detach-time drain
@@ -3270,13 +3552,17 @@ export async function finishExit(
     // environment; 50ms proved too tight there) while staying well inside
     // the exit window the user already waits through.
     await new Promise<void>(resolve => setTimeout(resolve, 150))
-    runtime?.drainStdin?.()
-    if (stderrNotice !== undefined) {
+    if (input !== undefined) input.drain()
+    else runtime?.drainStdin?.()
+    if (stderrNotice !== undefined && input?.ownsInput() !== false) {
       await writeStream(process.stderr, `\n${stderrNotice}\n`)
     }
   } catch {
-    ctx.logger.debug('dsh-tui: terminal cleanup failed; continuing with process shutdown')
+    try {
+      ctx.logger.debug('dsh-tui: terminal cleanup failed; continuing with process shutdown')
+    } catch { /* a failed diagnostic must not swallow the exit action */ }
   }
+  input?.release()
   // Filesystem-only: the exported clipboard images live in a per-process
   // temp directory that nothing else removes.
   removeClipboardImageDir()
@@ -3379,6 +3665,25 @@ function superviseReplacement<T extends TuiRestartOptions>(exitSeam: ProcessExit
 
 function runRestart(ctx: Context, profile: string | undefined, sessionId: string, hint: (sessionId: string) => string = id => resumeCommand(profile, id), options: TuiRestartOptions = {}, exitSeam?: ProcessExitSeam): void {
   logRestartEvent('runRestart: entered, disposing cordis root')
+  // A wedged turn makes the root dispose wait forever: the agent teardown
+  // waits for the loop to reach quiescence, and a tool that ignores its
+  // AbortSignal never settles (dsh-agent-loop drains every dispatched tool on
+  // abort). Spawning the replacement then would race this process for the
+  // session mount, so the only honest answer is the resume hint the user can
+  // run after this process is gone.
+  // Held texts no replacement took (a stall, a failed spawn) stay on disk for
+  // the resume command, which names their file; without a session to resume
+  // they go. A replacement that ran took them already.
+  const dropHeldInputs = (): void => { takeHeldInputs({ ...options.env }) }
+  const resumeLine = (id: string): string => heldInputsResumeCommand(hint(id), options.env)
+  const ended = (): string => {
+    if (sessionId === '') dropHeldInputs()
+    return preservedSessionTail(sessionId, resumeLine)
+  }
+  const stalled = (): void => {
+    writeHandoffNotice(`\ndsh-tui restart timed out while stopping the current turn.${ended()}`)
+    process.exit(1)
+  }
   disposeRootAndThen(ctx, () => {
     logRestartEvent('runRestart: root disposed, starting restartTui')
     const supervision = superviseReplacement(exitSeam, options)
@@ -3394,8 +3699,10 @@ function runRestart(ctx: Context, profile: string | undefined, sessionId: string
         logRestartEvent('runRestart: restartTui resolved', { restartCode })
         if (restartCode !== 0) {
           writeHandoffNotice(
-            `\ndsh-tui restart failed to spawn (exit ${restartCode}).${preservedSessionTail(sessionId, hint)}`,
+            `\ndsh-tui restart failed to spawn (exit ${restartCode}).${ended()}`,
           )
+        } else {
+          dropHeldInputs()
         }
         process.exit(restartCode)
       },
@@ -3403,12 +3710,12 @@ function runRestart(ctx: Context, profile: string | undefined, sessionId: string
         const message = restartError instanceof Error ? restartError.message : String(restartError)
         logRestartEvent('runRestart: restartTui rejected', { message })
         writeHandoffNotice(
-          `\ndsh-tui restart failed: ${message}.${preservedSessionTail(sessionId, hint)}`,
+          `\ndsh-tui restart failed: ${message}.${ended()}`,
         )
         process.exit(1)
       },
     )
-  })
+  }, stalled)
 }
 
 function runUpdate(
@@ -3420,24 +3727,43 @@ function runUpdate(
   hint: (sessionId: string) => string = id => resumeCommand(profile, id),
   exitSeam?: ProcessExitSeam,
 ): void {
+  const recovery = preservedSessionTail(sessionId, hint)
   disposeRootAndThen(ctx, () => {
+    logRestartEvent('update: starting', { profile, targetVersion })
+    writeHandoffNotice(`\ndsh-tui: installation starts. Check/repair an interrupted installation before resuming.${recovery}`)
     if (profile === undefined) {
-      process.stderr.write(`\n${t('update-aborted-no-profile')}\n`)
+      writeHandoffNotice(`\n${t('update-aborted-no-profile')}${recovery}`)
       process.exit(1)
     }
-    void updateTuiAndRestart(sessionId, profile, targetVersion, kernel, superviseReplacement(exitSeam, {})).then(
+    const cancellation = new AbortController()
+    const supervision: TuiRestartOptions = superviseReplacement(exitSeam, {})
+    const replacementRequest = exitSeam?.request
+    if (exitSeam !== undefined) exitSeam.request = () => {
+      cancellation.abort()
+      // Installer owns its cancellation deadline. Entry fallback disposal
+      // must not kill this process before the owned installer tree settles.
+      return 'supervising'
+    }
+    const onSpawn = supervision.onSpawn
+    supervision.onSpawn = child => {
+      if (exitSeam !== undefined) exitSeam.request = replacementRequest
+      onSpawn?.(child)
+    }
+    void updateTuiAndRestart(sessionId, profile, targetVersion, kernel, supervision, cancellation.signal).then(
       ({ updateCode, restartCode }) => {
+        logRestartEvent('update: finished', { updateCode, restartCode })
         if (updateCode !== 0) {
-          process.stderr.write(
-            `\ndsh-tui update failed (exit ${updateCode}).${preservedSessionTail(sessionId, hint)}`,
+          writeHandoffNotice(
+            `\ndsh-tui update failed (exit ${updateCode}). Check/repair the installation before resuming.${preservedSessionTail(sessionId, hint)}`,
           )
         }
         process.exit(restartCode)
       },
       updateError => {
+        logRestartEvent('update: rejected')
         const message = updateError instanceof Error ? updateError.message : String(updateError)
-        process.stderr.write(
-          `\ndsh-tui update failed: ${message}.${preservedSessionTail(sessionId, hint)}`,
+        writeHandoffNotice(
+          `\ndsh-tui update failed: ${message}. Check/repair the installation before resuming.${preservedSessionTail(sessionId, hint)}`,
         )
         process.exit(1)
       },

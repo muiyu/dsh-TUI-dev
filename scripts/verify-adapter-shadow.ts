@@ -147,6 +147,9 @@ const METHOD_POLICY: Record<string, Record<string, MethodPolicy>> = {
   },
   TuiStatusRuntime: {
     set: { kind: 'capability', capability: 'host.status.set' },
+    // Footer fields mutate the same status surface as set(); reusing the
+    // effect class is the seam decision (no new capability bit).
+    setField: { kind: 'capability', capability: 'host.status.set' },
     registerView: { kind: 'capability', capability: 'host.status.register-view' },
     subscribe: { kind: 'capability', capability: 'host.status.subscribe' },
   },
@@ -213,7 +216,7 @@ const NON_SERVICE_POLICY: Readonly<Record<string, {
     default: { kind: 'exempt', reason: 'internal Cordis-free dialog queue; public adapter entry points are TuiDialogRuntime.select/confirm/input' },
   }),
   TuiStatusStore: Object.freeze({
-    default: { kind: 'exempt', reason: 'internal Cordis-free status store; public adapter entry points are TuiStatusRuntime.set/subscribe' },
+    default: { kind: 'exempt', reason: 'internal Cordis-free status store; public adapter entry points are TuiStatusRuntime.set/setField/registerView/subscribe' },
   }),
   TuiToastStore: Object.freeze({
     default: { kind: 'exempt', reason: 'internal Cordis-free toast sink; public adapter entry point is TuiToastRuntime.show' },

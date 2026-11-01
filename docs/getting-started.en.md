@@ -29,8 +29,12 @@ PowerShell:
 $env:DEEPSEEK_API_KEY = 'your-key'
 ```
 
-Never commit a real credential. A normal profile launch reads the environment
-variable directly.
+Never commit a real credential. You can also set nothing at all: the **first step of the
+first-run guide** signs in to a subscription (OAuth, including DeepSeek account browser
+authorization) or adds a model provider with an API key, writes it into the DSH credential
+store (`$DSH_HOME/.credentials.yaml`, by default `~/.dsh/.credentials.yaml`) and picks one of
+the models it brought in as the default — the environment variable is only the "you can also
+do this" path. A normal profile launch reads the environment variable directly when it is set.
 
 ## Install
 
@@ -114,6 +118,11 @@ dsh --profile dsh-tui
 The process starts in the current directory, which is also the Agent's default
 workspace. Change into the target project before starting it.
 
+On DSH 0.2.1 and later the Agent can move its session to another directory
+(the `working_directory` tool, or a Git worktree). The status line, Git branch,
+`@` completion and `!` commands follow that directory, including after
+`/resume`. The session stays registered under the project it started in.
+
 On Windows, the checkout also provides:
 
 ```bat
@@ -186,7 +195,7 @@ diagnostics, a profile plugin inventory, and repair guidance.
     reinstalls/aligns;
   - `dsh-tui doctor` runs environment diagnostics.
 
-## Running in VS Code / Herdr
+## Running in VS Code / Herdr / any terminal
 
 - **VS Code**: run directly in the integrated terminal, or use the
   `dsh-tui-vscode` companion extension on the Marketplace (real terminal
@@ -196,6 +205,13 @@ diagnostics, a profile plugin inventory, and repair guidance.
   no extra setup; dsh-TUI reports `idle` / `working` / `blocked` through
   Herdr's local integration API (questionnaires and tool approvals count as
   `blocked`), and stays completely inactive outside Herdr.
+- **Any terminal**: dsh-TUI reports `idle` / `working` / `blocked` / `done` /
+  `error` over the pty using
+  [OSC 7501 (Program Status Protocol)](https://www.superlogical.com/rex/docs/build/program-status),
+  so a terminal or agentic inbox that implements it can show what the session
+  is doing and when it needs you. Terminals that do not implement it ignore the
+  sequence, so there is nothing to configure; set `DSH_TUI_PROGRAM_STATUS=0` to
+  turn the reports off.
 
 ## Update to the latest version
 
@@ -321,6 +337,20 @@ After each source change, build, pack, install in isolation, and launch with:
 ```sh
 pnpm dev
 ```
+
+`pnpm dev` keeps the full install/build/pack checks by default. For explicit local
+iteration, set `DSH_TUI_DEV_FAST=1` (for example,
+`DSH_TUI_DEV_FAST=1 pnpm dev -- --no-launch`). A miss runs frozen install,
+`compile`, pack without repeating `prepare`, and isolated profile installation.
+An unchanged hit skips all four stages only while source/config and compiler-loader contents,
+Node/pnpm/npm/dsh versions, compiled and vendor output, the tarball, and the installed
+package/profile match. Replacing pnpm/npm/dsh without changing its reported version
+requires one normal (non-fast) development run.
+Internal document links such as `CLAUDE.md -> AGENTS.md` are fingerprinted;
+external, excluded, dangling or cyclic links and unreadable inputs disable reuse
+with a diagnostic. Failures invalidate the success stamp before work begins.
+The script prints stage durations and cache hits. Run normal `pnpm build` and
+focused regressions before publishing; fast mode does not change release gates.
 
 `pnpm dev:copy-config` copies only `~/.dsh/settings.yaml` and
 `~/.dsh/.credentials.yaml`. Files are set to mode `0600` on Unix; Windows uses

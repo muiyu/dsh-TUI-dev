@@ -6,14 +6,17 @@
 [dsh-std](https://github.com/T-Auto/dsh-std) 公共协议之上，说明「什么样的插件能被
 dsh-TUI 装载、进市场」，以及 dsh-TUI 私有的协议坐标（`tui.dsh/*`）。
 
-## 口径（先读这三条）
+## 口径（先读这四条）
 
 1. **归属**：它属于 dsh-TUI 仓库，由 dsh-TUI 维护者维护，**随本仓库代码一起修订**。
 2. **不是社区 RFC**：这里没有「提交提案 → 征求意见 → 批准」的流程，也没有
    Draft / Experimental / Candidate / Stable 的晋级档位。实现变了就把这里改到与实现
    一致。公共/社区协议语义属于上游 [dsh-std](https://github.com/T-Auto/dsh-std)；
    生态入口与索引在 [`T-Auto/dsh-ecosystem-spec`](https://github.com/T-Auto/dsh-ecosystem-spec)。
-3. **用途**：它是 **dsh-TUI 子插件的参考标注**——插件作者、插件市场与评审读它来了解
+3. **没有自己的版本号**：`tui-profile/package.json` 不声明 `version`——profile 身份是
+   `registry/registry-0.15.json` 里的 `profileHash` 钉与本仓库的提交，不是 semver；它随
+   dsh-TUI 的包发布，版本线只属于根 `package.json`（`verify:plugin-spec` 钉住"不自称版本"）。
+4. **用途**：它是 **dsh-TUI 子插件的参考标注**——插件作者、插件市场与评审读它来了解
    当前 dsh-TUI 期望什么、有哪些私有坐标与权限、怎么自检。
 
 本目录是**纯文件**：曾是指向 `T-Auto/dsh-ecosystem-spec` 的 git submodule，现已取消
