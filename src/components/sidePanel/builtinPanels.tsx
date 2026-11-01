@@ -1,7 +1,7 @@
 /** Register built-in panels in the shared panel store. */
 import React from 'react'
 import { t } from '../../i18n.js'
-import { GoalTodoPanel } from '../GoalTodoPanel.js'
+import { GoalTodoPanel, type GoalTodoPanelScrollHandle } from '../GoalTodoPanel.js'
 import { JobsPanel } from '../JobsPanel.js'
 import { SubagentDashboard } from '../SubagentDashboard.js'
 import { SubagentDetailScene } from '../SubagentDetailScene.js'
@@ -15,7 +15,7 @@ import { useSidePanelChannel } from './SidePanelRuntimeContext.js'
 import { usePanelInput } from './usePanelInput.js'
 import { jobsFocusStore } from './jobsFocusStore.js'
 import { agentViewStore } from './agentViewStore.js'
-import { subagentFailureReads } from './subagentFailureReads.js'
+import { subagentFailureRead, subagentFailureScope, useUnreadSubagentFailures } from './subagentFailureRead.js'
 import { agentComposeTargetOf, type AgentComposeTarget } from '../messages/agentTeam.js'
 import type { PanelProps } from './types.js'
 
@@ -27,14 +27,26 @@ function TodoPanelAdapter({ width, height, focused, visible }: PanelProps): Reac
   // 修复前头部行 onClick 没接（GoalTodoPanel 的 onToggle 未传），
   // 侧栏里点折叠头是死控件。
   const [collapsed, setCollapsed] = React.useState(false)
+  const scrollRef = React.useRef<GoalTodoPanelScrollHandle | null>(null)
   const toggleCollapsed = React.useCallback(() => setCollapsed(previous => !previous), [])
+  // v2.1 分发：活动面板先吃键。↑/↓ 滚动（内容超出时逐行），Enter/Space
+  // 折叠；Esc / Ctrl / Meta 返回 false，宿主回退与聊天全局键照旧。
   usePanelInput((input, key) => {
     if (key.ctrl || key.meta || key.escape) return false
+    if (key.upArrow === true) {
+      scrollRef.current?.scrollBy(-1)
+      return true
+    }
+    if (key.downArrow === true) {
+      scrollRef.current?.scrollBy(1)
+      return true
+    }
     if (key.return_ !== true && input !== ' ') return false
     toggleCollapsed()
     return true
   }, { active: focused && visible })
-  // 行数预算：goal 区最多 2 行 + 折叠头 1 行 + 留白 1 行，其余给 todo 列表。
+  // 行模型由组件按真实折行数（目标/状态/blocked/折叠头/todo）构建，宿主
+  // 不再猜预算；wrapWidth 仍是 todo 的折行宽。
   return (
     <GoalTodoPanel
       channel={channel}
@@ -42,7 +54,9 @@ function TodoPanelAdapter({ width, height, focused, visible }: PanelProps): Reac
       visible={visible}
       collapsed={collapsed}
       onToggle={toggleCollapsed}
-      maxTodos={Math.max(3, height - 4)}
+      width={width}
+      height={height}
+      scrollRef={scrollRef}
       // 折行宽 = 面板宽 − 左右 padding 2 − 树形前缀 3 − 状态 glyph 2，
       // 再留 1 格余量防 ink 二次折行（长行溢出超过约束会把同行定宽列挤折）。
       wrapWidth={Math.max(10, width - 8)}
@@ -145,6 +159,8 @@ let lastAgentsRoute: AgentsRoute = 'dashboard'
 function AgentsPanelAdapter({ focused, visible }: PanelProps): React.ReactNode {
   const channel = useSidePanelChannel()
   const subagents = channel.subagents
+  const unreadFailures = useUnreadSubagentFailures(channel)
+  const failureScope = subagentFailureScope(channel)
   const version = channel.version
   const [route, setRoute] = React.useState<AgentsRoute>(lastAgentsRoute)
   React.useEffect(() => { lastAgentsRoute = route }, [route])
@@ -164,25 +180,26 @@ function AgentsPanelAdapter({ focused, visible }: PanelProps): React.ReactNode {
   const detailCompose = detailTarget !== undefined && messageControl !== undefined
     ? { control: messageControl, target: detailTarget }
     : undefined
-  const sessionId = channel.sessionId
-  const readVersion = React.useSyncExternalStore(subagentFailureReads.subscribe, subagentFailureReads.getVersion)
+  // Team-only provisioning failures retain their dashboard acknowledgement.
+  const seenTeamFailures = React.useRef<ReadonlySet<string>>(new Set())
   React.useEffect(() => {
     const running = subagents.filter(s => s.status === 'running' || s.status === 'starting').length
-
-    // Team members that failed but aren't already tracked in the subagent roster.
-    const teamFailedCount = (channel.team?.members ?? [])
-      .filter(m => m.phase === 'failed' && !subagents.some(s => s.agentId === m.id))
-      .length
-    if (visible) subagentFailureReads.acknowledge(channel, sessionId, subagents)
-    const unread = subagentFailureReads.unread(channel, sessionId, subagents) + (visible ? 0 : teamFailedCount)
-
-    panelStore.setBadge(
-      'agents',
-      unread > 0 ? { level: 'error', unread } : running > 0 ? { level: 'info', unread: 0 } : null,
-    )
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- roster changes publish a channel version bump
-  }, [channel, version, visible, sessionId, readVersion])
-  React.useEffect(() => () => panelStore.clearBadge('agents'), [])
+    const agentIds = new Set(subagents.map(agent => agent.agentId))
+    const teamFailures = new Set((channel.team?.members ?? [])
+      .filter(member => member.phase === 'failed' && !agentIds.has(member.id)).map(member => member.id))
+    if (visible) {
+      // The visible dashboard acknowledges every failed child (the pre-existing
+      // badge contract); the detail view additionally acknowledges one target.
+      seenTeamFailures.current = teamFailures
+      for (const agent of subagents) if (agent.status === 'failed') subagentFailureRead.acknowledge(failureScope, agent)
+      panelStore.setBadge('agents', running > 0 ? { level: 'info', unread: 0 } : null)
+      return
+    }
+    const unread = new Set(unreadFailures)
+    for (const id of teamFailures) if (!seenTeamFailures.current.has(id)) unread.add(id)
+    panelStore.setBadge('agents', unread.size > 0 ? { level: 'error', unread: unread.size }
+      : running > 0 ? { level: 'info', unread: 0 } : null)
+  }, [version, visible, unreadFailures])
 
   // 行暂时不在名册里（会话切换 / replay 尚未回填）时退回 dashboard，但不清
   // 路由：行回来后用户原来看的那一页还在——这正是 enabled 挂载策略要保的
@@ -194,6 +211,7 @@ function AgentsPanelAdapter({ focused, visible }: PanelProps): React.ReactNode {
     return (
       <SubagentDetailScene
         subagent={detail}
+        onFailureRead={agent => subagentFailureRead.acknowledge(failureScope, agent)}
         variant="panel"
         focused={focused}
         visible={visible}

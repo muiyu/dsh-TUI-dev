@@ -13,6 +13,7 @@ import { truncateWidth } from '../../../trajectory/format.js'
 import type { ClickEvent } from '../../../ink/events/click-event.js'
 import type { DragEvent } from '../../../ink/events/drag-event.js'
 import { panelStore } from '../PanelStore.js'
+import { useUnreadSubagentFailures } from '../subagentFailureRead.js'
 import { PANEL_MIN_COLUMNS } from '../dimensions.js'
 import { getCompanionSkin, subscribeCompanionSkin } from '../../../tuiDisplayPrefs.js'
 import { useSidePanelChannel, SidePanelRuntimeContext } from '../SidePanelRuntimeContext.js'
@@ -166,13 +167,12 @@ export function CompanionPanel({ width, height, focused, visible }: PanelProps):
   const runtimeCtx = React.useContext(SidePanelRuntimeContext)
   const activity = runtimeCtx?.activity
   const attentionCtx = runtimeCtx?.attention
-  const agentsBadge = React.useSyncExternalStore(panelStore.subscribe, () => panelStore.get('agents')?.badge ?? null)
-  const failedSubagentsUnread = agentsBadge !== null && agentsBadge.level === 'error' ? agentsBadge.unread : 0
   const jobsBadge = React.useSyncExternalStore(panelStore.subscribe, () => panelStore.get('jobs')?.badge ?? null)
   const jobsFailedUnread = jobsBadge !== null && jobsBadge.level === 'error' ? jobsBadge.unread : 0
 
   const subagents = channel.subagents ?? []
   const backgroundJobs = channel.backgroundJobs ?? []
+  const failedSubagents = useUnreadSubagentFailures(channel).size
 
   // 本地重渲染驱动（互动/气泡/动画帧都要在事件之外推进）。
   const [, setBump] = React.useState(0)
@@ -255,7 +255,7 @@ export function CompanionPanel({ width, height, focused, visible }: PanelProps):
         approvalPending: (attentionCtx?.approvals ?? 0) > 0,
         questionPending: (attentionCtx?.questions ?? 0) > 0,
       },
-      failures: { failedJobsUnread: jobsFailedUnread, failedSubagentsUnread },
+      failures: { failedJobsUnread: jobsFailedUnread, failedSubagents },
       lastInputAt: lastInputAtRef.current,
       celebration: celebrateUntil > now ? { kind: 'turn-done' as const, until: celebrateUntil } : undefined,
       sleepAfterMs: SLEEP_AFTER_MS,
