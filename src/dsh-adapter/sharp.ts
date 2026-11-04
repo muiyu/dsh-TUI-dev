@@ -13,7 +13,9 @@
  * module resolves to `undefined`; callers keep their text fallback.
  */
 import { createRequire } from 'node:module'
+import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { findHostDsh } from './host-dsh.js'
 
 export type SharpModule = Awaited<typeof import('sharp')>['default']
 
@@ -28,16 +30,23 @@ export function loadSharp(): Promise<SharpModule | undefined> {
 /**
  * Candidate `sharp` entry files, host first. The host anchor is a blessed
  * upstream package: profile installs alias `@deepseek-ai/*` to the running
- * dsh, so resolving `sharp` from that location walks the host's tree.
+ * dsh, so resolving `sharp` from that location walks the host's tree. An
+ * installed profile without that alias falls back to the host package the
+ * `dsh` on PATH resolves to.
  */
-export function sharpCandidatePaths(): string[] {
+export function sharpCandidatePaths(env: NodeJS.ProcessEnv = process.env): string[] {
   const local = createRequire(import.meta.url)
   const paths: string[] = []
   try {
     const anchor = local.resolve('@deepseek-ai/dsh-session/package.json')
     paths.push(createRequire(anchor).resolve('sharp'))
   } catch {
-    // The host tree has no sharp (or no dsh-session); use our own copy.
+    try {
+      const host = findHostDsh(env)
+      if ('packageDir' in host) paths.push(createRequire(join(host.packageDir, 'package.json')).resolve('sharp'))
+    } catch {
+      // The host tree has no sharp (or no host is found); use our own copy.
+    }
   }
   try {
     paths.push(local.resolve('sharp'))
