@@ -73,12 +73,16 @@ if (process.env.DSH_VERIFY_IMAGE_SPLIT_SHARP === '1') {
     // `utils/imageResize.ts` re-exports the pure probe from the neutral seam
     // (`backends/shared/image-size.ts`), so the profile tree carries both —
     // and the ingress adaptation now also pulls in the pure-JS bitmap
-    // converter (`utils/bmp.ts`).
-    for (const file of ['dsh-adapter/sharp.ts', 'utils/imageResize.ts', 'backends/shared/image-size.ts', 'utils/bmp.ts']) {
-      const target = join(profile, 'src', file)
-      mkdirSync(dirname(target), { recursive: true })
-      copyFileSync(new URL(`../src/${file}`, import.meta.url), target)
+    // converter (`utils/bmp.ts`). The loader's PATH fallback brings
+    // `dsh-adapter/host-dsh.ts` and its import-free siblings.
+    const copySources = (tree: string): void => {
+      for (const file of ['dsh-adapter/sharp.ts', 'dsh-adapter/host-dsh.ts', 'dsh-adapter/host-contract.ts', 'dsh-adapter/lite-profile.ts', 'dsh-adapter/process-exit.ts', 'utils/imageResize.ts', 'backends/shared/image-size.ts', 'utils/bmp.ts']) {
+        const target = join(tree, 'src', file)
+        mkdirSync(dirname(target), { recursive: true })
+        copyFileSync(new URL(`../src/${file}`, import.meta.url), target)
+      }
     }
+    copySources(profile)
     const { loadSharp, sharpCandidatePaths } = await import(pathToFileURL(join(profile, 'src/dsh-adapter/sharp.ts')).href)
     assert.deepEqual(sharpCandidatePaths(), [host, profile].map(tree => join(tree, 'node_modules/sharp/index.js')))
     const shared = await loadSharp()
@@ -94,6 +98,32 @@ if (process.env.DSH_VERIFY_IMAGE_SPLIT_SHARP === '1') {
     assert.equal(tracking.hostCalls, 2, 'both adaptation paths use the host factory')
     assert.equal(await loadSharp(), shared, 'adaptation shares the memoized module')
     console.log('split-tree image ingress regression passed')
+
+    // An installed profile has no `@deepseek-ai/*` alias: the host comes from
+    // the `dsh` launcher on PATH (an npm-style shim into the host package).
+    const installed = join(scratch, 'installed')
+    write(join(installed, 'package.json'), '{"type":"module"}')
+    write(join(installed, 'node_modules/sharp/package.json'), '{"type":"module","main":"index.js"}')
+    write(join(installed, 'node_modules/sharp/index.js'), 'export default function factory() {}')
+    copySources(installed)
+    const hostPackage = join(host, 'node_modules/@deepseek-ai/dsh')
+    write(join(hostPackage, 'package.json'), '{"name":"@deepseek-ai/dsh"}')
+    write(join(hostPackage, 'bin/dsh.js'), '')
+    const hostBin = join(host, 'bin')
+    write(join(hostBin, 'dsh'), '#!/bin/sh\nexec node "$basedir/../node_modules/@deepseek-ai/dsh/bin/dsh.js" "$@"\n')
+    write(join(hostBin, 'dsh.cmd'), '@"%~dp0\\..\\node_modules\\@deepseek-ai\\dsh\\bin\\dsh.js" %*\r\n')
+    const installedLoader = await import(pathToFileURL(join(installed, 'src/dsh-adapter/sharp.ts')).href)
+    assert.deepEqual(
+      installedLoader.sharpCandidatePaths({ PATH: hostBin }),
+      [host, installed].map(tree => join(tree, 'node_modules/sharp/index.js')),
+      'an installed profile resolves the host sharp through the dsh on PATH',
+    )
+    assert.deepEqual(
+      installedLoader.sharpCandidatePaths({ PATH: '' }),
+      [join(installed, 'node_modules/sharp/index.js')],
+      'with no dsh on PATH the loader keeps its own copy',
+    )
+    console.log('installed-profile PATH fallback regression passed')
   } finally {
     Reflect.deleteProperty(globalThis, '__dshSharpFixture')
     assert.equal(dirname(scratch), realpathSync(tmpdir()))
