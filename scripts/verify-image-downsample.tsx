@@ -76,7 +76,7 @@ if (process.env.DSH_VERIFY_IMAGE_SPLIT_SHARP === '1') {
     // converter (`utils/bmp.ts`). The loader's PATH fallback brings
     // `dsh-adapter/host-dsh.ts` and its import-free siblings.
     const copySources = (tree: string): void => {
-      for (const file of ['dsh-adapter/sharp.ts', 'dsh-adapter/host-dsh.ts', 'dsh-adapter/host-contract.ts', 'dsh-adapter/lite-profile.ts', 'dsh-adapter/process-exit.ts', 'utils/imageResize.ts', 'backends/shared/image-size.ts', 'utils/bmp.ts']) {
+      for (const file of ['dsh-adapter/sharp.ts', 'dsh-adapter/host-dsh.ts', 'dsh-adapter/contract.ts', 'dsh-adapter/host-contract.ts','dsh-adapter/lite-profile.ts', 'dsh-adapter/process-exit.ts', 'utils/imageResize.ts', 'backends/shared/image-size.ts', 'utils/bmp.ts']) {
         const target = join(tree, 'src', file)
         mkdirSync(dirname(target), { recursive: true })
         copyFileSync(new URL(`../src/${file}`, import.meta.url), target)
