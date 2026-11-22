@@ -37,6 +37,8 @@ type AppBootModule = Pick<typeof AppBoot, ContractExports<'appBoot'>>
 /** `@deepseek-ai/dsh/profile-boot`, declared locally: the host CLI is not a dependency. */
 interface ProfileBootModule {
   prepareProfile(name: string, userLayer?: boolean, fromDefaultProfile?: string): AppBoot.Profile
+  /** Added in 0.2.2-rc.2; older hosts keep their existing attribution. */
+  userAgentProfile?(name: string): string
   readonly INSTALL_ANCHOR: string
   readonly PROFILE_ROOT_FILENAME: 'cordis.yml'
 }
@@ -279,6 +281,32 @@ export interface PrepareHostRootOptions {
   readonly exitSeam?: ProcessExitSeam
 }
 
+/** Install only package resolution for a child command, without composing or
+ * rewriting its profile. Even loadProfileDirectory can migrate the manifest,
+ * so use the resolver's supported synthetic profile instead. */
+export async function prepareHostModuleResolution(host: HostDsh, profileDir: string): Promise<Context> {
+  const profile: AppBoot.Profile = {
+    name: basename(profileDir),
+    dir: profileDir,
+    layers: [],
+    patchPath: join(profileDir, 'cordis.patch.yml'),
+    patches: [],
+    skippedBundles: [],
+  }
+  const resolution = await host.appBoot.createRuntimeResolution({
+    installAnchor: host.profileBoot.INSTALL_ANCHOR,
+    profile,
+  })
+  const ctx = new host.Context()
+  try {
+    await ctx.plugin(host.appBoot.PluginPackages as never, { resolution } as never)
+    return ctx
+  } catch (error) {
+    await ctx.fiber.dispose().catch(() => undefined)
+    throw error
+  }
+}
+
 /**
  * Build the entry's root from the host's `cordis` and install the host's
  * module resolution on it before any TUI module is imported, so the TUI and
@@ -359,6 +387,9 @@ export async function prepareHostRoot(host: HostDsh, options: PrepareHostRootOpt
     // uses the same final answer for its slot and for this composition mode.
     try {
       if (dsh) {
+        if (typeof profileBoot.userAgentProfile === 'function') {
+          process.env.DSH_USER_AGENT_SUFFIX = `dsh-profile/${profileBoot.userAgentProfile(options.profile)}`
+        }
         const disposeProxy = await host.httpProxy.installProxyFromEnvironment(environment, message => { process.stderr.write(`${BIN_NAME}: ${message}\n`) })
         if (disposeProxy !== undefined) ctx.effect(() => () => { void Promise.resolve(disposeProxy()).catch(() => undefined) }, 'dsh-tui host proxy')
         // 5. runProfile: fail-loud (removable here, unlike runProfile's).

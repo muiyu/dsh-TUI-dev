@@ -269,8 +269,10 @@ seam.
   - The dev declarations exist only so the package can type-check locally. Add
     new references of this kind to both sections at matching ranges (the
     verify:manifest-deps gate enforces it).
-  - Framework packages used only by tests/scripts (e.g. dsh-settings, dsh-tools,
-    dsh-session-persistence-*) stay dev-only — do NOT declare peers for them.
+  - Framework packages used only by tests/scripts (e.g. dsh-settings, dsh-tools)
+    stay dev-only — do NOT declare peers for them; packages the runtime actually
+    imports (e.g. `dsh-session-persistence-jsonl` for migrate) still need
+    optional peer + dev.
   - The host packages the standalone entry takes types from (`HOST_TYPE_PACKAGES` in
     `src/dsh-adapter/host-contract.ts`) are optional peer + dev too, for types only; the
     host CLI `@deepseek-ai/dsh` is no dependency. At
@@ -464,12 +466,16 @@ change, also run the closest focused script:
 | --- | --- |
 | General headless screen composition | `pnpm smoke` |
 | Footer fields / status seam (`tuiStatus.setField`, StatusLine slots and hover/click) | `node --import tsx/esm scripts/verify-status-fields.tsx` |
+| Plugin `@`-mention providers (`tuiMentions`, `@` popup merge and insertion) | `node --import tsx/esm scripts/verify-mention-providers.tsx`, plus `node scripts/verify-file-completion.mjs` (build first) |
+| Account notices over real Chat (inline/fullscreen, 80/36 columns, stream→idle, redelivery and resize) | `node --import tsx/esm scripts/verify-account-notification-chat-geometry.tsx` (12 scenarios, fake account/real xterm; included in `verify:oauth`) |
+| Footer row height at narrow widths (measured height of truncating text squeezed into a fractional width) | `node --import tsx/esm scripts/verify-status-footer-narrow.tsx` (asserts a three-row footer at every width from 60 to 130) |
+| Footer/composer anchoring at narrow widths and after resize (#1919: fullscreen status-row height, inline short-frame bottom anchor) | `node --import tsx/esm scripts/verify-narrow-footer-anchor.tsx`, `node --import tsx/esm scripts/verify-inline-frame-anchor.tsx` |
 | Footer field list (`statusBar.pluginFieldsOrder` syntax/normalization/rendering, settings picker and prefill) | `node --import tsx/esm scripts/verify-plugin-field-order.ts`, `node --import tsx/esm scripts/verify-plugin-field-picker.tsx` |
 | Shared projector, DSH translator | `pnpm verify:projection-golden`, `node --import tsx/esm scripts/verify-dsh-translate.ts`, `pnpm verify:agent-domain` |
 | Claude backend | The matching `scripts/verify-claude-*` (fake SDK, no cost) and `node --import tsx/esm scripts/verify-backend-channel.ts`; `verify:claude-live`/`verify:claude-headless` drive the real CLI, so run them by hand only when you mean to spend (pinned to haiku) |
 | Archive semantics and backend OAuth logout | `node --import tsx/esm scripts/verify-session-archive.tsx` (real headless browser, fake catalog), `node --import tsx/esm scripts/verify-backend-logout.ts` (real channel/UI facade, fake OAuth host); no native-login/real-credential mutation, preserving DSH/Claude default deletion |
 | Native Codex backend | `pnpm verify:codex-contract`, matching fake-app-server/fixture `scripts/verify-codex-*`, `node --import tsx/esm scripts/verify-backend-channel.ts`; neutral-layer changes also need DSH goldens, Claude comparisons and `verify-agent-event-invariants.ts`. Real `verify-codex-live.ts` / probes must use `codex-cheap-only.mjs`; explicitly list unavailable real ChatGPT login/TTY checks |
-| DSH Agent Teams (team-roster, team-tools, team-message bubble, team dashboard, `/team status` and its visibility, per-assembly delegation tools) | `node --import tsx/esm scripts/verify-agent-teams.ts`, `node --import tsx/esm scripts/verify-agent-teams-compat-0.2.0.ts` (0.2.0 log compatibility), `node --import tsx/esm scripts/verify-team-message-bubble.tsx`, `node --import tsx/esm scripts/verify-team-dashboard.tsx`, `node --import tsx/esm scripts/verify-team-mode.ts`, `node --import tsx/esm scripts/verify-team-command-visibility.ts`, `node scripts/verify-bundled-presets.mjs` (build first) |
+| DSH Agent Teams (team-roster on both wire shapes, team-tools, team-message bubble, team dashboard, `/team status|on|off` and its visibility, legacy-host bundle routing and per-assembly delegation tools) | `node --import tsx/esm scripts/verify-agent-teams.ts`, `node --import tsx/esm scripts/verify-agent-teams-compat-0.2.0.ts` (0.2.0 log compatibility), `node --import tsx/esm scripts/verify-team-message-bubble.tsx`, `node --import tsx/esm scripts/verify-team-dashboard.tsx`, `node --import tsx/esm scripts/verify-team-mode.ts`, `node --import tsx/esm scripts/verify-team-command-visibility.ts`, `node scripts/verify-bundled-presets.mjs` (build first) |
 | Channel submit/steer/pending behavior | `node scripts/verify-submit.mjs` |
 | Rewind/edit/resend and historical inbox cancellation | `pnpm verify:rewind-edit` |
 | Prompt queue behavior | `node scripts/verify-queue.mjs` |
@@ -479,6 +485,7 @@ change, also run the closest focused script:
 | Compaction × session-switch lifecycle (cancel before the fork snapshot, persistence-classified toast) | `node --import tsx/esm scripts/verify-compact-switch.tsx` |
 | Theme loading, persistence, and runtime plugin seam | `node --import tsx/esm scripts/verify-themes.mjs`, `node --import tsx/esm scripts/verify-runtime-themes.ts` |
 | Default-reasoning-effort and similar preference chains (effortPrefs / settings defaults) | `node --import tsx/esm scripts/verify-effort-default.ts` |
+| Frame alignment when a shrink fits the viewport (the anchored-repaint blank band) | `node --import tsx/esm scripts/verify-inline-shrink-to-fit.tsx` |
 | Scrolling/sticky-bottom behavior | `node scripts/verify-scroll.mjs`, `node scripts/verify-resticky.mjs`, `node --import tsx/esm scripts/verify-post-shrink-anchor.tsx`, `node --import tsx/esm scripts/verify-scroll-fold-anchor.tsx`, `node --import tsx/esm scripts/verify-scroll-fold-anchor-mounted.tsx`, `node --import tsx/esm scripts/verify-scroll-anchor-invalidation.tsx`, `node --import tsx/esm scripts/verify-scroll-anchor-remeasurement.tsx` (also with `DSH_TEST_COLUMNS=60`), and the matching `repro-*` harness |
 | Long plan-review body (`exit_plan_mode` windowing + wheel) | `node --import tsx/esm scripts/verify-plan-review-scroll.tsx` |
 | Fullscreen copy-on-select | `node scripts/verify-copy-on-select.mjs` |
@@ -491,6 +498,7 @@ change, also run the closest focused script:
 | Cross-process session mount ledger (failure behavior, strict reads, lock recovery, reservations) | `pnpm verify:session-mounts` |
 | Unsent-draft handoff across screens (snapshot, cursor, image bindings, ownership) | `pnpm verify:composer-draft-handoff`; end-to-end screen switching also `node scripts/verify-session-browser.mjs` |
 | Launcher `bin/dsh-tui.js` (argv parsing and delegation/bootstrap, safe mode, the `/update` launcher migration, the entry child's env) | `node scripts/verify-launcher.mjs` + `node scripts/verify-safe-mode.mjs` + `node scripts/verify-update.mjs` + `node scripts/verify-update-recovery.mjs` |
+| `/restart` and `/update` restart chain (in-place execve, delegated-chain replay, spawn fallback, Linux PTY facade) | `node --import tsx/esm scripts/verify-restart-process.ts` + `node --import tsx/esm scripts/verify-handoff-atomic.ts` + `node --import tsx/esm scripts/verify-handoff-pty-gate.mjs` |
 
 Most focused scripts invoked with plain `node` import `lib/types/`; run
 `pnpm build` first. Scripts that import TypeScript sources declare the

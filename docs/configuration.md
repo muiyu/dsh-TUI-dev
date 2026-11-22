@@ -27,15 +27,19 @@ Profile 启动按顺序叠加：
 
 ## 网页搜索与抓取（DSH 0.2.1-rc.5）
 
-标准 DSH profile 会加载新的 DeepSeek Search / Fetch API 提供者，默认仍使用
-Messages 搜索和本地 HTTP 抓取。在 `/settings` 的「网页搜索」分区，用左右键将
-「搜索」选为「搜索 API」、「抓取」选为「抓取 API」；选择立即保存，从下一次操作
-生效，不需要重启。切回 `Messages` / `HTTP` 可恢复原提供者。Enter 可输入第三方
+标准 DSH profile 会加载新的 DeepSeek Search / Fetch API 提供者。DSH `0.2.2-rc.5`
+起搜索默认是「自动」：DeepSeek 模型路由上的会话使用 Messages 搜索（不按次计费），
+其他路由以及模型对话之外的搜索使用搜索 API；抓取默认仍是本地 HTTP。在 `/settings`
+的「网页搜索」分区，用左右键在「搜索」里选择「自动」「搜索 API」或「Messages」、
+在「抓取」里选择「抓取 API」或「HTTP」；选择立即保存，从下一次操作生效，不需要
+重启。选择「自动」会清掉用户层的搜索提供者，交回按路由选择。Enter 可输入第三方
 提供者 ID。分区使用插件实际的 Loader 行 ID，也支持自定义 ID。
 
-「网页搜索」分区只有一个 API key 输入框，可直接粘贴当前搜索 API 的密钥。
-输入时显示掩码，确认后保存到 DSH 凭据库，不写入 profile 配置；重新打开只显示
-是否已设置，不回显原值。留空保留已有密钥，切换搜索 API 后使用该 API 的凭据。
+「网页搜索」分区的 API key 输入框跟随当前提供者的凭据引用：自动模式下 DeepSeek
+模型路由用 Messages 搜索的密钥；搜索 API 跟随的引用与它不同时（固定了
+`searchApiKeyEnv`，或模型路由自带 `apiKeyEnv`），会再显示一个输入框，两者共用
+同一引用时只显示一个。输入时显示掩码，确认后保存到 DSH 凭据库，不写入 profile
+配置；重新打开只显示是否已设置，不回显原值。留空保留已有密钥。
 
 「DeepSeek 搜索 / 抓取 API」分区可修改 API 基础地址、搜索结果数
 （1–50）和「发送原始问题」。基础地址包含路径前缀，不含 `/search` 或 `/fetch`，
@@ -44,7 +48,10 @@ Messages 搜索和本地 HTTP 抓取。在 `/settings` 的「网页搜索」分�
 用户提示的前 128 个字符随搜索请求发送，可在该分区关闭。Messages 搜索的端点与
 最大搜索次数在独立分区设置。
 
-也可通过用户 profile 补丁选择两个提供者：
+也可通过用户 profile 补丁固定两个提供者。它只写用户层，之后仍可在 `/settings` 选择
+「自动」清除这次覆盖、回到按路由选择；只有更下层的组合层（旧验证线的 `dsh-base`，或
+部署自带的 base 层补丁）固定了 `searchProvider` 时，才不提供「自动」，与官方 Web
+菜单一致：
 
 ```yaml
 - id: web
@@ -148,6 +155,7 @@ TUI bundle 继承已安装 DSH 官方组合的上报配置；上游未提供的�
 | `btw.contextTurns` | `4`（数值，1–8） | `/btw` 追问时带上的最近已完成问答组数；更早的组不进请求，线程和面板里仍保留。立即生效 |
 | `btw.contextBudget` | `24000`（数值，1000–200000） | `/btw` 追问携带的最近问答总字符数上限，超出时从最旧的一组开始丢。立即生效 |
 | `codeFrameStyle` | `light` | 回复里代码块的边框：`light` 只有顶部标签和左侧竖线，不多占行；`full` 是封闭的框。终端太窄时总是用纯文本 fence。立即生效 |
+| `nerdFontIcons` | `false` | `present` 交付卡用 Nerd Font 文件类型图标代替四格徽章；需要终端使用 Nerd Font Mono，否则图标显示为方框。默认关闭，保持与字体无关。立即生效 |
 | `turnUsageRow` | `false`（布尔） | 每回合末尾显示一行右对齐的用量（输入/输出、缓存、耗时、重试）；关闭时 `/tokens`、`/status` 和底栏悬停照样能看到这些数字 |
 | `modes` | 内置三档 | Shift+Tab 会话模式循环（plan/sandbox/approval 原子组合）；缺省为 默认 → 计划 → 完全访问 |
 | `upstreamRetry` | `true` | 为当前会话实际使用的 `llm-pi-ai` 渠道播种重试策略（最多重试 5 次，失败码覆盖传输类中断、含 `STREAM_CLOSED` 上游断链）：每次绑定（启动、`/model` 切换、resume）时检查该渠道，未声明 `retryPolicy` 才写入官方 `llm-pi-ai` settings 分节——内核 `llm-retry` 插件执行的就是这份策略。从不写闲置渠道；已显式声明 `retryPolicy` 的渠道（cordis.yml 或手改 settings）不会被覆盖；`false` 整体关闭 |
@@ -349,6 +357,7 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 | 变量 | 用途 |
 | --- | --- |
 | `VISUAL` / `EDITOR` | `Ctrl+G` 打开的外部编辑器（`VISUAL` 优先，可带参数如 `code --wait`；两者都未设置时提示配置，无 `vi` 兜底） |
+| `TERMINAL` | Linux：默认桌面处理器标记 `Terminal=true`（如 `vim.desktop`）时用于运行它的终端命令，可带参数（如 `kitty -1`）；未设置时依次用 KDE `kdeglobals` 的 `TerminalApplication`、`xdg-terminal-exec`、常见终端。此包装路径不支持非空 `Path=`，这类条目仍交给 `xdg-open`；其 generic 路径仍可能没有 TTY、忽略工作目录 |
 | `DEEPSEEK_API_KEY` | DeepSeek 凭证；运行模型的必需项 |
 | `DEEPSEEK_BASE_URL` | 覆盖 DeepSeek 兼容 API 端点 |
 | `DSH_HOME` | harness 家目录（profile、会话、凭据、附件）；未设置时用上游默认 `~/.dsh` |
@@ -421,7 +430,7 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 `dsh-auth` 插件包**。`/provider` 的添加分支提供 ChatGPT/Codex（`openai-codex`）、
 Claude（`anthropic`）、Grok（`xai`）订阅账号登录。宿主 pi-ai catalog 提供相应流程
 时还可使用 OpenAI 直连 ChatGPT 登录（`openai`，使用 OpenAI API 而非旧版 Codex
-后端）和 Meta Muse（`meta`）。当前主验证线 DSH `0.2.2-rc.1` 的开发依赖解析到 pi-ai
+后端）和 Meta Muse（`meta`）。当前主验证线 DSH `0.2.2-rc.5` 的开发依赖解析到 pi-ai
 `1.2.0`，包含 Meta Muse 与 OpenAI 直连登录。`/auth status`、`/auth login [provider]`、
 `/auth logout <provider>` 对这些 pi-ai 路由操作同一套凭据。浏览器授权会尝试自动打开页面，并在同一
 问卷中提供授权链接与手动粘贴回调 URL/代码的输入；设备码流程在轮询期间显示可复制的

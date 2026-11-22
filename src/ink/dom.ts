@@ -88,6 +88,18 @@ export type DOMElement = {
   scrollHeight?: number
   scrollViewportHeight?: number
   scrollViewportTop?: number
+  // Last absolute screen row of the ScrollBox itself (before padding), used
+  // to distinguish a box move from a viewport edge resize.
+  scrollBoxY?: number
+  // Selection-follow progress baseline, normally the last painted scrollTop.
+  // Explicit jumps reset it; a same-batch wheel starts at the jump target,
+  // even while that target is still behind the mount clamp, so catching up
+  // the jump itself never becomes selection-follow debt.
+  scrollPaintedTop?: number
+  // A follow/selection-relevant scroll move is in flight but the paint was
+  // clamped this frame. Keep it set until the painted position catches up
+  // so the selection receives the deferred delta exactly once.
+  scrollFollowPending?: boolean
   // maxScroll of the most recent TRUSTED (non-shrink) frame. Virtualization
   // can transiently shrink scrollHeight; a positional at-bottom check must
   // not compare against a maxScroll computed from such an artifact frame,
@@ -575,10 +587,20 @@ function measureTextDimensions(
   }
 
   // This is happening when <Box> is shrinking child nodes and layout asks
-  // if we can fit this text node in a <1px space, so we just say "no"
-  if (dimensions.width >= 1 && width > 0 && width < 1) {
-    return dimensions
+  // if we can fit this text node in a <1px space. Truncated text never wraps:
+  // below one column the drawing path cuts the whole string — newlines
+  // included — to nothing, so the node paints exactly one row. The `dimensions`
+  // measured above are instead the WRAPPED count of the untruncated text (a `~`
+  // measured at 0.16 columns reports height 7), and a footer row that keeps that
+  // height paints one line plus six blank ones — the narrow-footer blank band
+  // (#1883/#1926). Width keeps reporting the natural extent so the parent still
+  // sees "does not fit" and keeps shrinking.
+  if (textWrap.startsWith('truncate') && dimensions.width >= 1 && width > 0 && width < 1) {
+    return { width: dimensions.width, height: 1 }
   }
+  // Wrapping modes must reach wrapText below: paint still wraps at this
+  // fractional width (one grapheme per row), so the wrapped count of the
+  // untruncated text is not the height the node occupies (#1933).
 
   // For text with embedded newlines (pre-wrapped content), avoid re-wrapping
   // at measurement width when layout is asking for intrinsic size (Undefined mode).

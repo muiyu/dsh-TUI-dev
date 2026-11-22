@@ -28,17 +28,25 @@ only for a genuinely new service.
 
 ## Web search and fetch (DSH 0.2.1-rc.5)
 
-The standard DSH profile loads the new DeepSeek Search / Fetch API providers,
-while Messages search and local HTTP fetch remain the defaults. In `/settings`,
-use the arrow keys in **Web search** to select **Search API** and **Fetch API**.
-Each selection saves immediately and applies to the next operation. Choose
-**Messages** / **HTTP** to restore the original providers. Enter accepts a custom
-provider ID. Sections use the plugin's actual Loader entry ID, including custom IDs.
+The standard DSH profile loads the new DeepSeek Search / Fetch API providers. From
+DSH `0.2.2-rc.5` search defaults to **Automatic**: a conversation on a DeepSeek
+model route runs Messages search (no per-search charge), while every other route
+and a search outside a model request runs the Search API. Fetch still defaults to
+local HTTP. In `/settings`, use the arrow keys in **Web search** to select
+**Automatic**, **Search API**, or **Messages** under Search and **Fetch API** or
+**HTTP** under Fetch. Each selection saves immediately and applies to the next
+operation. **Automatic** clears the user-layer provider so the per-route choice
+applies again. Enter accepts a custom provider ID. Sections use the plugin's
+actual Loader entry ID, including custom IDs.
 
-**Web search** has one **API key** input. Paste the key for the selected search API;
-typing is masked and confirmation saves it in DSH's credential store, outside
+The **API key** input follows the selected provider's credential reference:
+under Automatic the Messages search key serves a DeepSeek model route, and the
+Search API gets its own input when the reference it follows differs (a pinned
+`searchApiKeyEnv`, or the model route's own `apiKeyEnv`). One shared reference
+keeps one input.
+Typing is masked and confirmation saves it in DSH's credential store, outside
 profile configuration. Reopening shows only whether a key is configured. Blank
-input preserves the saved key, and switching APIs selects that API's credential.
+input preserves the saved key.
 
 The **DeepSeek Search / Fetch API** section edits the API base URL,
 result count (1–50), and **Send original question**. The base URL
@@ -48,7 +56,11 @@ Search sends the first 128 characters of the latest user prompt by default;
 the section can disable this. Messages search has its own endpoint and maximum
 search count section.
 
-The user profile patch can also select both providers:
+A user profile patch can also pin both providers. It only writes the user
+layer, so **Automatic** stays available afterwards and selecting it clears
+this override back to the per-route choice. Only a lower composition layer
+(an older `dsh-base`, or a deployment's own base-layer patch) that pins
+`searchProvider` removes **Automatic**, as in the official Web menu:
 
 ```yaml
 - id: web
@@ -165,6 +177,7 @@ A complete common override looks like this:
 | `btw.contextTurns` | `4` (number, 1–8) | Completed Q/A pairs a `/btw` follow-up carries; older pairs stay in the thread and panel but are not sent. Applies immediately |
 | `btw.contextBudget` | `24000` (number, 1000–200000) | Character budget for the recent Q/A pairs a `/btw` follow-up carries; the oldest pairs drop first. Applies immediately |
 | `codeFrameStyle` | `light` | Frame of fenced code blocks in replies: `light` is a top label plus a left rail and costs no extra rows; `full` closes the box. Very narrow terminals always use a plain fence. Applies immediately |
+| `nerdFontIcons` | `false` | The `present` delivery card uses Nerd Font file-type icons instead of four-cell badges; requires a Nerd Font Mono, otherwise the glyphs render as boxes. Off by default, keeping the card font-independent. Applies immediately |
 | `turnUsageRow` | `false` (boolean) | Show a right-aligned usage row at the end of each turn (tokens in/out, cache, duration, retries); `/tokens`, `/status` and the footer hover report the same numbers either way |
 | `modes` | built-in trio | Shift+Tab session-mode cycle (plan/sandbox/approval atom bundles); defaults to default → plan → full-access |
 | `upstreamRetry` | `true` | Seed a retry policy (5 attempts, transport-drop-aware failure codes including `STREAM_CLOSED`) on the `llm-pi-ai` provider route the bound session actually uses, whenever it declares no `retryPolicy` — at every bind (boot, `/model` switch, resume), through the official `llm-pi-ai` settings section (the policy the kernel's `llm-retry` plugin executes). Dormant channels are never written; routes with an explicit `retryPolicy` (cordis.yml or hand-edited settings) are never overwritten; `false` opts out entirely |
@@ -398,6 +411,7 @@ for the complete field reference.
 | Variable | Purpose |
 | --- | --- |
 | `VISUAL` / `EDITOR` | External editor opened by `Ctrl+G` (`VISUAL` wins; arguments like `code --wait` are allowed; with neither set the TUI prompts you to configure one — no `vi` fallback) |
+| `TERMINAL` | Linux: terminal command used to run a `Terminal=true` default handler (e.g. `vim.desktop`), optionally with arguments (e.g. `kitty -1`); when unset, the TUI falls back to KDE's `kdeglobals` `TerminalApplication`, `xdg-terminal-exec`, then a known terminal. Non-empty `Path=` is not supported by this wrapper: those entries remain with `xdg-open`, whose generic path can still lack a TTY and ignore the working directory |
 | `DEEPSEEK_API_KEY` | Required DeepSeek credential |
 | `DEEPSEEK_BASE_URL` | Override the compatible DeepSeek API endpoint |
 | `DSH_HOME` | Harness home (profiles, sessions, credentials, attachments); falls back to the upstream default `~/.dsh` |
@@ -482,7 +496,7 @@ The `/provider` add branch signs in to ChatGPT/Codex (`openai-codex`), Claude
 (`anthropic`), or Grok (`xai`) subscriptions. When the installed host's pi-ai
 catalog ships the corresponding flows, it also offers OpenAI direct ChatGPT sign-in
 (`openai`, using the OpenAI API rather than the legacy Codex backend) and Meta
-Muse (`meta`). The primary validated DSH `0.2.2-rc.1` development fixture resolves pi-ai
+Muse (`meta`). The primary validated DSH `0.2.2-rc.5` development fixture resolves pi-ai
 `1.2.0`, which includes Meta Muse and OpenAI direct sign-in.
 `/auth status`, `/auth login [provider]`, and `/auth logout <provider>` use
 that credential store for these pi-ai routes. Browser authorization tries to open the page

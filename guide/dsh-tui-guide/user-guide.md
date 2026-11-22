@@ -30,7 +30,7 @@ dsh-tui
 - `dsh-tui safe`：安全模式——只读查看环境、列出 profile 插件并给出修复建议，还能创建干净的救援 profile（见 §5.5）。
 - `dsh --profile dsh-tui`：与 `dsh-tui` 等价的手工启动方式（`/update` 仅此方式可用）。
 - `deepseek-official` 路由需要 `DEEPSEEK_API_KEY`；DSH 0.2.0-rc.1+ 可用标准 profile 的 `deepseek-account` 浏览器授权路由。其他支持的订阅模型可用内置 OAuth 登录。环境自检用 `/doctor`。
-- 主验证 dsh 引擎版本 `0.2.2-rc.1`；兼容列表以 `ADAPTER.md` 为准，列表之外的版本在 logo 页提示版本漂移与对齐命令。
+- 主验证 dsh 引擎版本 `0.2.2-rc.5`；兼容列表以 `ADAPTER.md` 为准，列表之外的版本在 logo 页提示版本漂移与对齐命令。
 - 如果 logo 页出现 ⚠ 版本漂移警告，按提示执行 `npm i -g @deepseek-ai/dsh@<版本>` 对齐 dsh 引擎。
 
 ### 1.2 首次启动你会看到
@@ -347,7 +347,7 @@ dsh-tui
 | `/migrate` | `[agent] [--dry-run]` | 从其他编程代理（claude-code/codex/omp/zcode/grok-build）导入对话历史，子进程运行不卡界面，详见[会话迁移](migrate.md) |
 | `/init` | 无 | 在工作目录创建 `AGENTS.md`（created / exists / failed 三态提示） |
 | `/agents` | 无 | 本会话子代理列表 |
-| `/team` | `status`（默认） | 实验性 Agent Teams 的状态报告；只在团队服务运行后出现在帮助与 `/` 补全里，报告 bundle、服务与本会话 teammate。开关改用 `/plugin enable\|disable @deepseek-ai/dsh-experimental-agent-team-profile`（服务未运行时手敲 `/team` 会给出开启提示） |
+| `/team` | `status`（默认）\| `on` \| `off [force]` | Agent Teams：`/team`（或 `/team status`）报告会话级选择、服务与本会话子代理；`/team on` / `/team off` 写入本会话（根会话及其整棵子代理树）的团队选择，跨重启保持。关闭不停止子代理也不删任务；仍有子代理在运行时 `off` 会先提示，确认用 `/team off force`。旧宿主（0.2.2-rc.1 及更早）上开关仍是 `/plugin enable\|disable @deepseek-ai/dsh-experimental-agent-team-profile`，`/team` 只报告并给出迁移提示 |
 | `/jobs` | 无 | 后台任务面板：状态/运行时长/退出码实时跟踪，`↑/↓` 选择、`k` 停止；面板打开时 `Esc` **只关面板**不打断回合（想中断先关面板再 `Ctrl+C`） |
 | `/settings` | 无 | 打开插件设置编辑器（命名空间读取/编辑） |
 | `/setup` | 无 | 重跑首次引导向导（账号与模型接入 / 语言主题 / 模型工作区 / 快捷键），与首次启动是同一个界面 |
@@ -480,6 +480,9 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 - 问卷**最后一行是自由输入行**（直接打字连同选项标签一起提交）。
 - 计划评审**批准必须无反馈文本**。
 - 审批与问卷同时挂起时**审批优先**；后台会话发起的审批会标注 `来自后台会话 <会话 id 前 8 位>`。
+- 等待中的工具授权会随「通知」开关走系统通知（标题「dsh-TUI · 等待授权」，见 §5.3 的 `taskNotifications`）；开启 `jumpBack` 后点击这条通知会回到对应窗格，原生 toast 排队期间若开关关闭、会话已切换或审批已答完则取消。
+- 等待中的提问会随「通知」开关走系统通知（标题「dsh-TUI · 等待回答」，正文是首个问题的标题与问题本身，选项留在面板里；见 §5.3 的 `taskNotifications`）；本地向导与登录流程里的问卷提问同样提醒，子代理的提问只进面板，上游 0.2.2 的 approval intent 提问按普通等待回答提醒。开启 `jumpBack` 后点击这条通知也会回到对应窗格，原生 toast 排队期间若开关关闭、会话已切换或提问已答完则取消。
+- 计划评审也会随「通知」开关走系统通知（标题「dsh-TUI · 计划评审」，正文只含问题标题与问题本身，不含整份计划与选项；见 §5.3 的 `taskNotifications`）；它是唯一不让位的一类：外部通知插件只把审批与普通提问映射成通知，计划评审不在其中，让位就只剩它那条不区分事件的「等待输入」，不会标明是计划评审在等你。开启 `jumpBack` 后点击这条通知也会回到对应窗格，原生 toast 排队期间若开关关闭、会话切换或计划评审已处理则取消。
 
 ### 4.8 技能 / 注册表 / Goals-Todos
 
@@ -598,9 +601,11 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 | jobGroupFold | 连续的后台任务卡：auto（默认，≥2 张成组；整组落定且 ≥3 张时折叠成汇总行）/ always（≥2 张立即折叠，含在跑的任务）/ never（从不自动折叠，每张卡都留着）。组头一行汇总状态与合计时长，点组头或 Ctrl+O 展开 |
 | effortDefault | 默认推理强度：自动及当前后端/模型声明的档位（包括自定义 ID）。未支持的已存值仍可读；加载中或不可用时仅可选自动 |
 | smoothStreaming | 流式平滑输出（默认开）：回复/思考/工具卡正文按 ~30fps 匀速揭示；回放/历史完整直出 |
-| toolBackground | 工具卡背景强调：none / subtle / strong；展开后也生效 |
+| toolBackground | 工具卡背景强调：none / subtle / strong；展开后也生效。`present` 交付卡始终保留自己的底色：无背景时暖橙，轻微/明显时紫罗兰；极简界面除外 |
+| taskNotifications | 通知（默认「仅失焦时」）：一个开关同时管四类系统通知——任务完成、等待工具授权、等待回答与计划评审。完成通知标题「dsh-TUI · 任务已完成」，正文为本轮回复的单行纯文本摘要；审批通知标题「dsh-TUI · 等待授权」，正文只含会话名、工具名与宿主给出的理由（已归一化并限长，模型写的理由会原样出现，不读取工具调用的参数）；提问通知标题「dsh-TUI · 等待回答」，正文只含首个问题的标题与问题，不含选项与详情（模型提问与本地向导/登录等经问卷面板的提问都算；上游 0.2.2 的 approval intent 提问按这条提醒；子代理的提问本版只进面板）；计划评审标题「dsh-TUI · 计划评审」，正文只含问题标题与问题本身、不含整份计划与选项，且是唯一不让位的一类；原生 toast 排队投递期间，开关关闭、会话切换或审批/提问/计划评审已处理都会取消。每条审批各提醒一条，且只提醒当前会话（后台会话与子代理不提醒）。投递方式由 `notificationMethod` 决定，原生 toast 投不出去时回落到响铃；外部 DSH 通知插件已启用并处于 active 时，完成、审批与提问让位，计划评审不让位。立即生效 |
 | turnUsageRow | 回合用量行（默认关闭）：在每回合末显示 token、缓存、耗时与重试摘要；`/tokens`、`/status` 和底栏 token 悬停不受此开关影响 |
 | mermaidDiagrams | Mermaid 图表（默认开）：回复中的 ```` ```mermaid ```` 代码块画成字符图，流式期间逐步成形；比终端宽或类型不支持的图保留源码并注明所需列数。立即生效 |
+| nerdFontIcons | Nerd Font 文件图标（默认关）：`present` 交付卡用文件类型图标代替四格徽章；需要终端使用 Nerd Font Mono，否则图标显示为方框。立即生效 |
 | mathRendering | LaTeX 公式（默认 `auto`，在 `/settings` 的**公式设置**子页里）：回复中的 `$…$`、`\(…\)` 行内公式，`$$…$$`、`\[…\]` 与单独成行的 `\begin{align}` 等显示环境块级公式的显示方式。`auto` 用当前最好的渲染方式（目前是 Unicode 文本，块级公式里的分数与上下限竖排），`image` 在支持图形的终端里用 MathJax 把公式排版成图片——Kitty 图形协议（Kitty、Ghostty、WezTerm、iTerm2 等）或 Sixel（Windows Terminal 1.22+、xterm、foot、WezTerm）（颜色跟随主题文字色；块级公式最多 16 行，行内公式在能压成一行且不糊时也显示为一行高的图片；流式中的公式、暗色的思考区、不支持图形的终端、压成一行太小以及任何渲染失败都退回 Unicode），`unicode` 固定用 Unicode 文本，`source` 保留原始 TeX。不支持、仍在流式输出或比终端宽的公式保留源码（过宽的块级公式先退成单行）。价格（`$5`）、shell 变量（`$HOME`）与代码里的 `$` 不受影响。旧的 `latexMath: false` 仍等同 `source`。**点击公式图片**打开预览卡：按 2 倍单元格尺寸重排，可 100%–800% 缩放、拖拽平移，`Esc` 或点击卡片外关闭，标题即该公式的 TeX。Sixel 下公式**不带衬底**（只画笔画），终端底色或壁纸会透出来。标题立绘这类自带透明留白的插图同样不带衬底（`whaleGirl` 的真图就是这个行为）；照片、截图与卡片内的图像仍合成到底色上，因为 Sixel 表达不了软 alpha。立即生效 |
 | mathImageScale | 公式图片大小（默认 `auto`，与上一条同在**公式设置**子页）：配合 LaTeX 公式的「图片」使用——`auto` 与正文同尺寸，`large` / `xlarge` 把**块级**公式排得更大；终端图片是按设备像素 1:1 画的，所以"更大"就等于"每个笔画更多像素"，是唯一的清晰度杠杆。行内公式不受影响（只能占一行）。立即生效 |
 | scrollGutter | 转录边栏：timeline（轮次时间线，默认）/ scrollbar（比例滚动条）/ hidden。立即生效 |
@@ -608,6 +613,7 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 | foldTerminalCommand | 折叠终端命令（默认关）：终端卡（Bash/PowerShell）多行命令折成首行 + 计数；`Ctrl+O` 或点击卡片展开 |
 | expandEditor | 全屏草稿编辑（默认开）：输入行尾 `⛶` 或 `Ctrl+Shift+E` 展开成整屏编辑器；`Ctrl+Enter` 发送、`Esc` 收起（草稿还在）；关掉后入口不显示 |
 | statusBar.* | 上表全部状态栏开关（compact/model/thinking/cwd/contextUsage/cache/tokens/cost/tps/gitBranch/sessionTitle/sessionId/mode/contextBar/activity/trajectory/pluginFields/pluginFieldsOrder；statusBar.sessionId 是底栏显示开关，与 cordis 的启动 sessionId 无关；pluginFieldsOrder 是插件字段名单：`''`=不显示、`*`=全部、`a,b;c;d`=三组即三槽） |
+| jumpBack | 通知跳回（Windows，默认关，管完成、等待授权、等待回答与计划评审）：开启后窗格标题末尾追加 `[dsh-tui:<16 位十六进制>]` 标记；点击本会话的完成、等待授权、等待回答或计划评审通知回到这个窗格，无法核验的布局降级为普通通知。第一条能承诺跳回的 toast 会注册当前用户的 HKCU 协议键。立即生效 |
 
 **effortDefault**：模型没有该档时向下选择最近的可用档位，否则回到模型默认，并弹提示。DSH 的优先级为 settings 用户层 > 上次 `/effort`
 （effort.json，即上次实际运行的档位）> cordis `effort`（部署默认值）> 模型默认。Claude/Codex 通过自身控制接口和后端偏好应用修改；启动采用自动模式或恢复会话时保留原有选择，在设置中主动选择自动会重置为模型默认。
@@ -615,6 +621,10 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 **scrollGutter**：scrollbar 轨道可直接拖；`Shift`/`Alt`/`Ctrl`+拖动仍是文字选择。
 
 **pageMargin**：自定义 `NxM` = 左右 `N` 列、上下 `M` 行（上限 8x4）；只填 `N` 则上下 1 行。
+
+**通知投递**：支持 OSC 777/9 的终端上，标题与正文合计受 2048 字节序列预算约束（含协议开销），按完整字素截短；没有回复时只显示标题，BEL 只响铃。本地 Windows 上 `auto` 解析为原生 toast（`windows`）：首次弹出注册当前用户的 AppUserModelID（AUMID，写 HKCU），弹出比任务结束晚约 3 秒（零安装路线要付的 PowerShell 冷启动代价）；注册写不进去时回落到响铃，而不是静默。本地 Windows 上，外部 DSH 通知插件已启用且处于 active 时，完成、审批与提问让位给它，计划评审不让位。显式 `osc9` 与 iTerm2/Warp 一样把标题放在正文前；SSH 会话的 `auto` 保留所连接终端的通知协议，显式 `windows` 仍选择运行主机的原生通知。回放、取消与失败不通知；inline 与 fullscreen 都支持。
+
+**通知跳回（`jumpBack`）**：Windows 上默认关闭，需要原生 toast 通道（`notificationMethod` = `windows`，本地 Windows 的 `auto` 会选它）。开启后窗格标题末尾追加 `[dsh-tui:<16 位十六进制>]` 标记，同一进程内不变；关闭即去掉后缀。开启期间，本进程在启用时与每次发出通知前刷新 `~/.dsh-tui/notify/jumpback/<session>.json`（`schemaVersion: 1`、`marker`、`pid`、`startedAt`），并由第一条能承诺跳回的 toast 注册当前用户的协议处理器（`URL Protocol` 与 `shell\open\command`）到 `HKCU\Software\Classes\dsh-tui`；正常退出删除该文件，并在没有其它存活实例需要时删除该键。只有发送前的探测恰好命中一个目标窗格（或一个标签标题）时，toast 才带 activation URI；点击时再跑五项核验——同一个窗格、获得键盘焦点、标题仍含标记、窗口在前台、未最小化——任一项不成立就拒绝跳转。目标已消失的点击不改变任何东西；无法核验的布局（目标在未选中标签且非该标签获焦窗格、使用 `suppressApplicationTitle`、非 Windows Terminal；在 Windows Terminal 1.24 实测）发普通 toast。探测会让每条 toast 晚约半秒，开启后第一条还可能等 helper 编译一次（几秒），本机编译器持续失败时最多每五分钟重试。外部发送方可读取同一个标记文件，把自己的 toast 指向 `dsh-tui:activate?m=<marker>`；URI 与文件格式是只读契约，本版不提供插件侧实现。
 
 未声明 TUI 区块的命名空间以只读形式列出，需手工编辑 profile 配置（旧版为 `~/.dsh/settings.yaml`）。
 以下设置**不在 /settings 内**，改 `$DSH_HOME/profiles/dsh-tui/cordis.patch.yml`：
@@ -637,6 +647,7 @@ provider / model / cwd / preset / workspace / sessionId / modes，
   - WSL：WSLg 把 Windows 位图暴露为 `image/bmp`，dsh-tui 会转成 PNG 再附加。
   - 上面的工具读不到时，回退到 `powershell.exe`（需要 Windows interop）读取 Windows 剪贴板，
     支持截图、资源管理器复制的文件与文本。
+- **通知**：tmux 的 OSC 通知需要 `set -g allow-passthrough on`，焦点报告需要 `set -g focus-events on`；不支持焦点报告的终端把 `taskNotifications` 设为 `always`。
 - 环境自检：`/doctor`。
 
 ### 5.5 安全模式与救援 profile（`dsh-tui safe`）

@@ -2,7 +2,8 @@
  * Backend discovery and the standalone host's final composition mode. Drives
  * the real HostRoot, Cordis Loader, assembly and profile include; the installed
  * host boundary supplies a temporary profile and records DSH-only preparation.
- * No TTY, credentials, backend session or external process is needed.
+ * Also covers the migrate child's resolution scope: install, paths-only profile,
+ * and disposal. No TTY, credentials, backend session or external process is needed.
  *
  * Run: node --import tsx/esm scripts/verify-backend-host.ts
  */
@@ -17,7 +18,7 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import * as appBoot from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { assembleBackendsFromProfile } from '../src/dsh-adapter/backend-assembly.js'
-import { prepareHostRoot, type HostDsh } from '../src/dsh-adapter/host-dsh.js'
+import { prepareHostModuleResolution, prepareHostRoot, type HostDsh } from '../src/dsh-adapter/host-dsh.js'
 import { configuredBackend, entryKernel } from '../src/hostEntryRoute.js'
 import { createEntrySlot } from '../src/dsh-adapter/entry-slot.js'
 
@@ -29,9 +30,13 @@ const check = (label: string, ok: boolean): void => {
   console.log(`PASS ${label}`)
 }
 
-for (const source of ['env', 'memory', 'config', 'dsh', 'proxy-failure', 'cmdline-failure'] as const) {
+const originalUserAgentSuffix = process.env.DSH_USER_AGENT_SUFFIX
+for (const source of ['env', 'memory', 'config', 'dsh', 'dsh-rc2', 'proxy-failure', 'cmdline-failure'] as const) {
   const failing = source === 'proxy-failure' || source === 'cmdline-failure'
-  const expectedDsh = source === 'dsh' || failing
+  const expectedDsh = source === 'dsh' || source === 'dsh-rc2' || failing
+  process.env.DSH_USER_AGENT_SUFFIX = 'existing-suffix'
+  const profileName = 'verify / 中文 (%)'
+  const encodedProfile = 'host-encoded-profile'
   const home = join(dir, source)
   const profileDir = join(home, 'profile')
   const bundle = `@dsh-tui-verify/host-${source}`
@@ -111,8 +116,16 @@ for (const source of ['env', 'memory', 'config', 'dsh', 'proxy-failure', 'cmdlin
       if (source === 'cmdline-failure') throw new Error('cmdline-failure fixture failure')
       provideCmdline(ctx, input)
     } },
-    profileBoot: { prepareProfile: () => profile, INSTALL_ANCHOR: home, PROFILE_ROOT_FILENAME: 'cordis.yml' },
+    profileBoot: {
+      prepareProfile: () => profile, INSTALL_ANCHOR: home, PROFILE_ROOT_FILENAME: 'cordis.yml',
+      ...(source === 'dsh' ? {} : { userAgentProfile: (name: string) => {
+        assert.equal(name, profileName)
+        return encodedProfile
+      } }),
+    },
     httpProxy: { installProxyFromEnvironment: async () => {
+      assert.equal(process.env.DSH_USER_AGENT_SUFFIX,
+        source === 'dsh' ? 'existing-suffix' : `dsh-profile/${encodedProfile}`)
       proxyInstalled += 1
       if (source === 'proxy-failure') throw new Error('proxy-failure fixture failure')
       return async () => { proxyClosed += 1 }
@@ -121,7 +134,7 @@ for (const source of ['env', 'memory', 'config', 'dsh', 'proxy-failure', 'cmdlin
   const env = source === 'env' ? { DSH_TUI_BACKEND: id } : {}
   const route = () => entryKernel(env, { configured: configuredBackend('verify', patchPath), memoryFile: memory })
   check(`${source}: before discovery the route only knows the built-in DSH fallback`, route() === 'dsh')
-  const root = await prepareHostRoot(host, { profile: 'verify', args: [] })
+  const root = await prepareHostRoot(host, { profile: profileName, args: [] })
   root.ctx.logger.warn = () => undefined
   root.ctx.logger.info = () => undefined
   let rootDisposed = false
@@ -145,6 +158,8 @@ for (const source of ['env', 'memory', 'config', 'dsh', 'proxy-failure', 'cmdlin
       continue
     }
     await root.selectKernel(dsh)
+    check(`${source}: profile User-Agent follows the host export and selected kernel`,
+      process.env.DSH_USER_AGENT_SUFFIX === (dsh && source !== 'dsh' ? `dsh-profile/${encodedProfile}` : 'existing-suffix'))
     const slot = createEntrySlot(dsh)
     check(`${source}: the slot and DSH-only preparation share the final mode`,
       slot.dsh === dsh && proxyInstalled === Number(dsh)
@@ -160,8 +175,54 @@ for (const source of ['env', 'memory', 'config', 'dsh', 'proxy-failure', 'cmdlin
     check(`${source}: the selected DSH failure handler remains removable`, failLoudRemoved === Number(dsh))
   } finally {
     await root.ctx.fiber.dispose()
+    if (originalUserAgentSuffix === undefined) delete process.env.DSH_USER_AGENT_SUFFIX
+    else process.env.DSH_USER_AGENT_SUFFIX = originalUserAgentSuffix
   }
-  check(`${source}: only a selected DSH proxy needs closing`, proxyClosed === Number(source === 'dsh'))
+  check(`${source}: only a selected DSH proxy needs closing`, proxyClosed === Number(expectedDsh))
+}
+
+// ── prepareHostModuleResolution: the migrate child's scope lifetime ──────────
+{
+  const home = join(dir, 'migrate-child')
+  const profileDir = join(home, 'profiles', 'dsh-tui')
+  mkdirSync(profileDir, { recursive: true })
+  writeFileSync(join(home, 'package.json'), '{"name":"@deepseek-ai/dsh","version":"0.0.0"}\n')
+  writeFileSync(join(profileDir, 'package.json'), '{"name":"dsh-tui","version":"0.0.0"}\n')
+  const resolution = {
+    profilesDir: join(home, 'profiles'), profileDir, localPackageNames: [], entries: [], linkedRoots: [],
+  }
+  let prepared: {
+    installAnchor?: string
+    profile?: { name?: string, dir?: string, layers?: readonly unknown[], patches?: readonly unknown[] }
+  } | undefined
+  const host: HostDsh = {
+    packageDir: home, version: '0.2.2-rc.2', Context, Loader,
+    appBoot: {
+      ...appBoot,
+      createRuntimeResolution: async options => {
+        prepared = options
+        return resolution as never
+      },
+    },
+    homePaths: { dshHomePath: (...segments: string[]) => join(home, ...segments), resolveDshHome: () => home },
+    launchEnvironmentKey: 'launchEnvironment',
+    cmdline: { provideCmdline: () => undefined },
+    profileBoot: {
+      // Only path fields may reach the resolver: preparing the profile would
+      // rewrite the shared manifest/root the user is migrating into.
+      prepareProfile: () => { throw new Error('the migrate child must not prepare the profile') },
+      INSTALL_ANCHOR: join(home, 'package.json'),
+      PROFILE_ROOT_FILENAME: 'cordis.yml',
+    },
+    httpProxy: { installProxyFromEnvironment: async () => undefined },
+  }
+  const scope = await prepareHostModuleResolution(host, profileDir)
+  check('the migrate child installs the host package resolution', scope.get('pluginPackages', false) !== undefined)
+  check('the resolution uses the real profile dir and a paths-only synthetic profile',
+    prepared?.installAnchor === join(home, 'package.json') && prepared.profile?.dir === profileDir
+    && prepared.profile.layers?.length === 0 && prepared.profile.patches?.length === 0)
+  await scope.fiber.dispose()
+  check('disposing the migration scope removes the resolution', scope.get('pluginPackages', false) === undefined)
 }
 
 console.log(`verify-backend-host OK (${passed} checks)`)

@@ -5,14 +5,14 @@ import type { ChannelState } from '../channel/types.js'
 import { isReservedCredentialRef } from '../credentialRefGuard.js'
 import type { OAuthProviderStatus, OAuthSetupHost, ProfilePathOp, ProviderSetupHost } from '../providerWizard.js'
 import { getPath, type SettingsHost } from '../settingsEditor.js'
-import type { SettingsNamespaceView, SettingsNamespaceWarning, TuiSettingsField, TuiSettingsSection } from '../../adapter/ports/channel-settings.js'
+import type { SettingsNamespaceView, SettingsNamespaceWarning, TuiSettingsField, TuiSettingsFieldWrite, TuiSettingsSection } from '../../adapter/ports/channel-settings.js'
 import { settingsValue } from '../compat/settings.js'
 import { concreteService } from '../host-access.js'
 
 // An opaque leaf survives the renderer's detached read projections. Plain
 // metadata cannot forge it; writes still pass the Channel UI lifetime/policy gate.
 class WebCredentialAuthorization {}
-const webCredentialFields = new WeakMap<object, { store: object; owner: object; ns: string; ref: string }>()
+const webCredentialFields = new WeakMap<object, { store: object; owner: object; ns: string; ref: string; slot: string }>()
 
 /** The web-search forms share one settings page: provider, fetch route, API
  *  route and key are one topic and are edited together. */
@@ -21,6 +21,23 @@ const WEB_SETTINGS_PAGE: NonNullable<TuiSettingsSection['page']> = Object.freeze
   title: 'Search',
   descriptions: Object.freeze({ zh: '搜索' }),
 })
+
+/** Credential-reference shape the credentials seam accepts (mirrors the host guard). */
+const CREDENTIAL_REF = /^[A-Za-z_][A-Za-z0-9_]*$/u
+
+/** A credential-reference draft: a valid name, or a clear for an empty one. */
+function credentialRefWrite(text: string): TuiSettingsFieldWrite | undefined {
+  const ref = text.trim()
+  if (ref === '') return { kind: 'clear' }
+  return CREDENTIAL_REF.test(ref) ? { kind: 'set', value: ref } : undefined
+}
+
+/** The credential choices 0.2.2-rc.2 offers for each Search/Fetch capability. */
+const BILLING_OPTIONS = [
+  { value: 'auto', label: 'Auto', descriptions: { zh: '自动' } },
+  { value: 'account', label: 'Account', descriptions: { zh: '账号' } },
+  { value: 'api-key', label: 'API key', descriptions: { zh: 'API 密钥' } },
+] as const
 
 /** Forms over the host's web settings; provider selection remains owned by DSH. */
 export function webSettingsSections(ctx: ServiceLookup, namespaces: readonly SettingsNamespaceView[]): TuiSettingsSection[] {
@@ -57,15 +74,178 @@ export function webSettingsSections(ctx: ServiceLookup, namespaces: readonly Set
   // This section is introduced together with live provider selection in rc.2.
   // Older hosts keep their existing search route without an ineffective picker.
   if (apiNs === undefined) return []
+  const valueOf = (ns: string | undefined): unknown =>
+    ns === undefined ? undefined : namespaces.find(view => view.ns === ns)?.value
+  const baseOf = (ns: string | undefined): unknown =>
+    ns === undefined ? undefined : namespaces.find(view => view.ns === ns)?.base
+  const webValue = valueOf(webNs)
+  const apiValue = valueOf(apiNs)
+  // 0.2.2-rc.2 replaced the shared `baseURL`/`apiKeyEnv` pair with per-capability
+  // endpoint and credential fields plus a billing choice; older hosts keep the
+  // pair. Follow the live Config shape so every host gets controls that apply.
+  const splitApi = getPath(apiValue, ['searchBilling']) !== undefined
+    || getPath(apiValue, ['fetchBilling']) !== undefined
+  /** A stored credential ref, when it is usable as a credentials-seam key. */
+  const credentialRefAt = (ns: string | undefined, path: readonly string[]): string | undefined => {
+    const value = getPath(valueOf(ns), path)
+    return typeof value === 'string' && CREDENTIAL_REF.test(value) ? value : undefined
+  }
+  /**
+   * The credential reference of the active DeepSeek API-key route. An unpinned
+   * Search/Fetch on rc.2 follows that route's origin and `apiKeyEnv` (the same
+   * directory the web provider resolves); only without the route does the
+   * provider fall back to DEEPSEEK_API_KEY.
+   */
+  const officialRouteRef = (): string | undefined => {
+    const llm = ctx.get('llm') as { listConfigurableProviders?(): readonly LlmConfigurableProvider[] } | undefined
+    let route: LlmConfigurableProvider | undefined
+    try { route = llm?.listConfigurableProviders?.().find(entry => entry.provider === 'deepseek-official') } catch { return undefined }
+    if (route === undefined || route.settingsPath.length !== 0) return undefined
+    return credentialRefAt(route.settingsNs, ['apiKeyEnv'])
+  }
+  const sharedApiKeyRef = officialRouteRef() ?? 'DEEPSEEK_API_KEY'
+  /** A capability's own endpoint opts out of the model route's credential. */
+  const apiKeyRef = (capability: 'search' | 'fetch'): string => {
+    const ownRef = credentialRefAt(apiNs, [`${capability}ApiKeyEnv`])
+    if (ownRef !== undefined) return ownRef
+    const ownBaseURL = getPath(apiValue, [`${capability}BaseURL`])
+    return typeof ownBaseURL === 'string' && ownBaseURL.length > 0
+      ? 'DEEPSEEK_API_KEY'
+      : sharedApiKeyRef
+  }
+  const store = ctx.get('credentials') as object | undefined
+  /** One write-only secret control over an exact Config owner and ref. */
+  const secretField = (options: {
+    path: readonly string[]
+    label: string
+    zh: string
+    hint: string
+    hintZh: string
+    ns: string | undefined
+    owner: object | undefined
+    ref: string
+  }): TuiSettingsField | undefined => {
+    if (options.ns === undefined || options.owner === undefined || store === undefined) return undefined
+    const authorization = Object.freeze(new WebCredentialAuthorization())
+    webCredentialFields.set(authorization, {
+      store: concreteService(store), owner: options.owner, ns: options.ns, ref: options.ref,
+      // Two controls can name the same ref (Search and Fetch share
+      // DEEPSEEK_API_KEY); the slot keeps one stale control from validating
+      // the other capability's identical ref.
+      slot: options.path.join('.'),
+    })
+    return {
+      path: options.path, label: options.label, descriptions: { zh: options.zh }, kind: 'text',
+      secret: { ref: options.ref, authorization },
+      hint: options.hint, hintDescriptions: { zh: options.hintZh },
+    }
+  }
+  // The Search key control follows the selected provider. With the rc.2 split
+  // fields a pinned `searchApiKeyEnv` names the store, otherwise the shared
+  // DEEPSEEK_API_KEY the provider falls back to; the legacy Messages route
+  // keeps its own `apiKeyEnv`.
+  // 0.2.2-rc.5 composes no provider: the unset selection is the per-route
+  // Automatic mode, which runs Messages search on a DeepSeek model route and
+  // the Search API on every other route. It therefore keeps the Messages
+  // route's control and gains the Search API's when the two read different
+  // credential references.
+  const webProvider = getPath(webValue, ['searchProvider'])
+  const automaticSearch = webProvider === undefined || webProvider === null || webProvider === ''
+  const searchApi = webProvider === 'deepseek-search-api'
+  const searchNs = searchApi ? apiNs : messagesNs ?? apiNs
+  const searchOwner = searchApi ? apiOwner : messagesOwner ?? apiOwner
+  const searchRef = searchApi && splitApi
+    ? apiKeyRef('search')
+    : credentialRefAt(searchNs, ['apiKeyEnv']) ?? 'DEEPSEEK_API_KEY'
+  const pinnedSearch = searchApi && splitApi
+  const automaticRouteRef = automaticSearch && splitApi ? apiKeyRef('search') : undefined
+  const routeSearchKey = automaticRouteRef === undefined || automaticRouteRef === searchRef
+    ? undefined
+    : secretField({
+      path: ['searchApiKey'], label: 'Search API key', zh: '搜索 API 密钥',
+      hint: 'Paste the key for the Search API route (its searchApiKeyEnv reference, or the shared DEEPSEEK_API_KEY). Under Automatic, conversations not on a DeepSeek model route use it. Saved keys are never displayed.',
+      hintZh: '粘贴搜索 API 路由所用密钥（searchApiKeyEnv 引用；未设置时为共享的 DEEPSEEK_API_KEY）。「自动」下，非 DeepSeek 模型路由的会话使用它，保存后不再显示原值。',
+      ns: apiNs, owner: apiOwner, ref: automaticRouteRef,
+    })
+  const searchKey = secretField({
+    path: pinnedSearch ? ['searchApiKey'] : ['apiKey'],
+    label: routeSearchKey === undefined ? 'API key' : 'Messages API key',
+    zh: routeSearchKey === undefined ? 'API 密钥' : 'Messages API 密钥',
+    ...(automaticSearch
+      ? {
+        hint: 'Paste a key for Messages search (its apiKeyEnv reference, or DEEPSEEK_API_KEY). Under Automatic, conversations on a DeepSeek model route use it. Saved keys are never displayed.',
+        hintZh: '粘贴 Messages 搜索所用密钥（apiKeyEnv 引用；未设置时为 DEEPSEEK_API_KEY）。「自动」下，DeepSeek 模型路由的会话使用它，保存后不再显示原值。',
+      }
+      : pinnedSearch
+        ? {
+          hint: 'Paste the key for the pinned Search endpoint (its searchApiKeyEnv reference, or the shared DEEPSEEK_API_KEY). Saved keys are never displayed.',
+          hintZh: '粘贴固定搜索端点所用密钥（searchApiKeyEnv 引用，未设置时为共享的 DEEPSEEK_API_KEY），保存后不再显示原值。',
+        }
+        : {
+          hint: 'Paste a key for the selected search API (the active DeepSeek API-key route reference; DEEPSEEK_API_KEY when no route is configured). Saved keys are never displayed.',
+          hintZh: '粘贴当前搜索 API 的密钥（跟随当前 DeepSeek API 密钥路由的引用；没有该路由时为 DEEPSEEK_API_KEY），保存后不再显示原值。',
+        }),
+    ns: searchNs, owner: searchOwner, ref: searchRef,
+  })
+  // The Fetch API can pin its own key on rc.2; when it shares the Search ref,
+  // the one control above already writes it.
+  const fetchApi = splitApi && getPath(webValue, ['fetchProvider']) === 'deepseek-fetch-api'
+  const fetchRef = fetchApi ? apiKeyRef('fetch') : undefined
+  // The Search controls already cover these references; a third control over
+  // the same reference would only duplicate their write.
+  const shownSearchRefs = new Set([searchRef])
+  if (routeSearchKey !== undefined && automaticRouteRef !== undefined) shownSearchRefs.add(automaticRouteRef)
+  const fetchKey = fetchRef === undefined || shownSearchRefs.has(fetchRef)
+    ? undefined
+    : secretField({
+      path: ['fetchApiKey'], label: 'Fetch API key', zh: '抓取 API 密钥',
+      hint: 'Paste the key for the Fetch endpoint (its fetchApiKeyEnv reference, or the active DeepSeek API-key route reference when it shares the Search key). Saved keys are never displayed.',
+      hintZh: '粘贴抓取端点所用密钥（fetchApiKeyEnv 引用；与搜索共用密钥时跟随当前路由引用），保存后不再显示原值。',
+      ns: apiNs, owner: apiOwner, ref: fetchRef,
+    })
+  // Only a base layer that pins a provider hides Automatic: the settings
+  // service rewrites an unset back to that inherited value, so the option
+  // would bounce. No base means no lower layer configures the namespace, and
+  // the per-route selection still applies; this is the same source the
+  // official Web menu reads.
+  const webBase = baseOf(webNs)
+  const baseProvider = getPath(webBase, ['searchProvider'])
+  const automaticOffered = webBase === undefined || webBase === null
+    ? true
+    : baseProvider === undefined || baseProvider === null || baseProvider === ''
   const sections: TuiSettingsSection[] = []
   if (webNs !== undefined) sections.push({
     ns: webNs, title: 'Web search', descriptions: { zh: '网页搜索' }, page: WEB_SETTINGS_PAGE,
     fields: [
       {
         path: ['searchProvider'], label: 'Search', descriptions: { zh: '搜索' }, kind: 'text',
-        hint: 'Select DeepSeek Search API or Messages search. Custom provider IDs are also accepted.',
-        hintDescriptions: { zh: '选择 DeepSeek Search API 或 Messages 搜索，也可输入自定义提供者 ID。' },
+        // The unset selection is 0.2.2-rc.5's per-route Automatic mode, not the
+        // legacy Messages provider, so it clears the user layer. A host whose
+        // base layer still pins the provider keeps its value and hides the
+        // option, as its own Web menu does.
+        format: value => typeof value === 'string' && value !== '' ? value : 'automatic',
+        parse: text => {
+          const value = text.trim()
+          if (value === '') return { kind: 'clear' }
+          if (value.toLowerCase() === 'automatic') {
+            // Only a selection where the base leaves the provider unset;
+            // elsewhere a clear would be rewritten back to the base value.
+            return automaticOffered ? { kind: 'clear' } : undefined
+          }
+          return { kind: 'set', value }
+        },
+        hint: automaticOffered
+          ? 'Select Automatic, DeepSeek Search API or Messages search. Automatic runs Messages search on a DeepSeek model route and the Search API elsewhere. Custom provider IDs are also accepted.'
+          : 'Select DeepSeek Search API or Messages search. Custom provider IDs are also accepted.',
+        hintDescriptions: {
+          zh: automaticOffered
+            ? '选择「自动」、「搜索 API」或 Messages 搜索。「自动」在 DeepSeek 模型路由上使用 Messages 搜索，其他路由使用搜索 API；也可输入自定义提供者 ID。'
+            : '选择 DeepSeek Search API 或 Messages 搜索，也可输入自定义提供者 ID。',
+        },
         options: [
+          ...(automaticOffered
+            ? [{ value: 'automatic', label: 'Automatic', descriptions: { zh: '自动' } }]
+            : []),
           { value: 'deepseek-search-api', label: 'Search API', descriptions: { zh: '搜索 API' } },
           { value: 'deepseek-official', label: 'Messages' },
         ],
@@ -79,41 +259,75 @@ export function webSettingsSections(ctx: ServiceLookup, namespaces: readonly Set
           { value: 'http', label: 'HTTP' },
         ],
       },
-      ...((): TuiSettingsField[] => {
-        const searchApi = getPath(namespaces.find(view => view.ns === webNs)?.value, ['searchProvider']) === 'deepseek-search-api'
-        const ns = searchApi ? apiNs : messagesNs ?? apiNs
-        const owner = searchApi ? apiOwner : messagesOwner ?? apiOwner
-        const ref = getPath(namespaces.find(view => view.ns === ns)?.value, ['apiKeyEnv']) ?? 'DEEPSEEK_API_KEY'
-        const store = ctx.get('credentials') as object | undefined
-        if (owner === undefined || store === undefined || typeof ref !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/u.test(ref)) return []
-        const authorization = Object.freeze(new WebCredentialAuthorization())
-        const field: TuiSettingsField = {
-          path: ['apiKey'], label: 'API key', descriptions: { zh: 'API 密钥' }, kind: 'text', secret: { ref, authorization },
-          hint: 'Paste a key for the selected search API. Saved keys are never displayed.',
-          hintDescriptions: { zh: '粘贴当前搜索 API 的密钥，保存后不再显示原值。' },
-        }
-        webCredentialFields.set(authorization, { store: concreteService(store), owner, ns, ref })
-        return [field]
-      })(),
+      ...(searchKey === undefined ? [] : [searchKey]),
+      ...(routeSearchKey === undefined ? [] : [routeSearchKey]),
+      ...(fetchKey === undefined ? [] : [fetchKey]),
     ],
   })
+  const countField: TuiSettingsField = {
+    path: ['count'], label: 'Search result count', descriptions: { zh: '搜索结果数' }, kind: 'number',
+    parse(text) {
+      if (text.trim() === '') return { kind: 'clear' }
+      const value = Number(text)
+      return Number.isInteger(value) && value >= 1 && value <= 50 ? { kind: 'set', value } : undefined
+    },
+  }
+  const sendOriginalQuestionField: TuiSettingsField = {
+    path: ['sendOriginalQuestion'], label: 'Send original question', descriptions: { zh: '发送原始问题' }, kind: 'boolean',
+    hint: 'Send up to 128 characters of the latest user prompt with the search query.',
+    hintDescriptions: { zh: '搜索时附带最近一条用户提示，最多 128 个字符。' },
+  }
   sections.push({
     ns: apiNs, title: 'DeepSeek Search / Fetch API',
     descriptions: { zh: 'DeepSeek 搜索 / 抓取 API' }, page: WEB_SETTINGS_PAGE,
-    fields: [
-      { path: ['baseURL'], label: 'API base URL', descriptions: { zh: 'API 基础地址' }, kind: 'text',
-        hint: 'Include the path prefix, without /search or /fetch.',
-        hintDescriptions: { zh: '包含路径前缀，不含末尾的 /search 或 /fetch。' } },
-      { path: ['count'], label: 'Search result count', descriptions: { zh: '搜索结果数' }, kind: 'number',
-        parse(text) {
-          if (text.trim() === '') return { kind: 'clear' }
-          const value = Number(text)
-          return Number.isInteger(value) && value >= 1 && value <= 50 ? { kind: 'set', value } : undefined
-        } },
-      { path: ['sendOriginalQuestion'], label: 'Send original question', descriptions: { zh: '发送原始问题' }, kind: 'boolean',
-        hint: 'Send up to 128 characters of the latest user prompt with the search query.',
-        hintDescriptions: { zh: '搜索时附带最近一条用户提示，最多 128 个字符。' } },
-    ],
+    fields: splitApi
+      ? [
+        countField,
+        sendOriginalQuestionField,
+        {
+          path: ['searchBaseURL'], label: 'Search API base URL', descriptions: { zh: '搜索 API 基础地址' }, kind: 'text',
+          hint: 'Optional Search endpoint including its path prefix; /search is appended. Pinning one takes Search off the conversation billing credential.',
+          hintDescriptions: { zh: '可选的搜索端点（含路径前缀，末尾自动追加 /search）。固定后搜索不再跟随会话的计费凭据。' },
+        },
+        {
+          path: ['searchApiKeyEnv'], label: 'Search API key reference', descriptions: { zh: '搜索 API 密钥引用' }, kind: 'text',
+          parse: credentialRefWrite,
+          hint: 'Credential reference the pinned Search endpoint uses; empty falls back to DEEPSEEK_API_KEY, or to the billing credential when no endpoint is pinned.',
+          hintDescriptions: { zh: '固定搜索端点使用的凭据引用；留空时回退 DEEPSEEK_API_KEY，未固定端点时改用计费凭据。' },
+        },
+        {
+          path: ['searchBilling'], label: 'Search billing', descriptions: { zh: '搜索计费凭据' }, kind: 'select',
+          options: BILLING_OPTIONS,
+          hint: 'Credential Search sends without its own endpoint/key. Auto follows the conversation.',
+          hintDescriptions: { zh: '搜索未固定自身端点/密钥时使用的凭据；自动跟随会话。' },
+        },
+        {
+          path: ['fetchBaseURL'], label: 'Fetch API base URL', descriptions: { zh: '抓取 API 基础地址' }, kind: 'text',
+          hint: 'Optional Fetch endpoint including its path prefix; /fetch is appended. Pinning one takes Fetch off the conversation billing credential.',
+          hintDescriptions: { zh: '可选的抓取端点（含路径前缀，末尾自动追加 /fetch）。固定后抓取不再跟随会话的计费凭据。' },
+        },
+        {
+          path: ['fetchApiKeyEnv'], label: 'Fetch API key reference', descriptions: { zh: '抓取 API 密钥引用' }, kind: 'text',
+          parse: credentialRefWrite,
+          hint: 'Credential reference the pinned Fetch endpoint uses; empty falls back to DEEPSEEK_API_KEY, or to the billing credential when no endpoint is pinned.',
+          hintDescriptions: { zh: '固定抓取端点使用的凭据引用；留空时回退 DEEPSEEK_API_KEY，未固定端点时改用计费凭据。' },
+        },
+        {
+          path: ['fetchBilling'], label: 'Fetch billing', descriptions: { zh: '抓取计费凭据' }, kind: 'select',
+          options: BILLING_OPTIONS,
+          hint: 'Credential Fetch sends without its own endpoint/key. Auto follows the conversation.',
+          hintDescriptions: { zh: '抓取未固定自身端点/密钥时使用的凭据；自动跟随会话。' },
+        },
+      ]
+      : [
+        {
+          path: ['baseURL'], label: 'API base URL', descriptions: { zh: 'API 基础地址' }, kind: 'text',
+          hint: 'Include the path prefix, without /search or /fetch.',
+          hintDescriptions: { zh: '包含路径前缀，不含末尾的 /search 或 /fetch。' },
+        },
+        countField,
+        sendOriginalQuestionField,
+      ],
   })
   if (messagesNs !== undefined) sections.push({
     ns: messagesNs, title: 'DeepSeek Messages search', descriptions: { zh: 'DeepSeek Messages 搜索' }, page: WEB_SETTINGS_PAGE,
@@ -150,6 +364,7 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
             applies: 'live' | 'restart'
             value: unknown
             user?: unknown
+            base?: unknown
             warning?: SettingsNamespaceWarning
           }[]
           mutate(
@@ -179,6 +394,7 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
             applies: descriptor.applies,
             value: descriptor.value,
             user: descriptor.user,
+            base: descriptor.base,
             warning: descriptor.warning,
           }))
         },
@@ -200,7 +416,8 @@ export function createSettingsHosts(ctx: ServiceLookup, assertActive: () => void
             const current = currentFields.flatMap(candidate => {
               const binding = candidate.secret?.authorization === undefined ? undefined : webCredentialFields.get(candidate.secret.authorization)
               return binding === undefined ? [] : [binding]
-            }).some(binding => binding.owner === authorized.owner && binding.ns === authorized.ns && binding.ref === ref)
+            }).some(binding => binding.owner === authorized.owner && binding.ns === authorized.ns
+              && binding.ref === ref && binding.slot === authorized.slot)
             if (!current || authorized.ref !== ref || authorized.store !== concreteService(store)) {
               throw new Error(t('settings-web-key-changed'))
             }

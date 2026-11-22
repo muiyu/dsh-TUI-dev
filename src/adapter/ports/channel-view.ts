@@ -113,6 +113,8 @@ export interface ChatRow {
   /** Actual execution location for `!command` rows. */
   executionTarget?: string
   text: string
+  /** Summary-only preview for folded compact rows; text remains complete. */
+  compactPreview?: string
   /** Durable session image blocks, loaded lazily through the attachment store. */
   images?: readonly TranscriptImage[]
   /** True while an assistant step is still streaming chunks. */
@@ -203,11 +205,32 @@ export interface ToolRow {
   liveOutputDropped?: number
 }
 
-/** Pending-call render intent (structural subset of dsh-tools ToolCallView). */
+/**
+ * One file an agent declared as a final deliverable (`present`). `path` is
+ * the path as the model wrote it and is what the card displays; `target`, when
+ * present, is the absolute path the result resolved it to (the click target
+ * and metadata source, so a later working-directory change cannot redirect
+ * it). `description` is the optional note the model attached for the user.
+ */
+export interface ToolPresentedFile {
+  readonly path: string
+  /** Absolute path resolved by the producing tool, when it reported one. */
+  readonly target?: string
+  readonly description?: string
+  /** Size in bytes when the presenter could stat the file. */
+  readonly size?: number
+  /** Last-modified time (Unix epoch ms) when the presenter could stat it. */
+  readonly mtimeMs?: number
+}
+
+/** Pending-call render intent (structural subset of dsh-tools ToolCallView;
+ *  `files` is this app's own card for explicit deliveries, see
+ *  {@link ToolPresentedFile}). */
 export type ToolCallView = ToolViewMeta & (
   | { readonly card: 'generic'; readonly title: string; readonly kind?: string }
   | { readonly card: 'terminal'; readonly title: string; readonly description?: string; readonly cwd?: string }
   | { readonly card: 'diff'; readonly title: string; readonly diffs: readonly ToolFileDiff[] }
+  | { readonly card: 'files'; readonly files: readonly ToolPresentedFile[] }
 )
 
 /**
@@ -231,9 +254,18 @@ export interface ToolViewMeta {
 export type ToolFileDiff =
   | {
       readonly path: string
-      /** Prior content, or null for a new file / no before-image. */
+      /** Prior content. `null` means no before-image was available (a new
+       *  file, or a call-time overwrite whose prior content the presenter
+       *  cannot read) — it does not imply the old file was empty. */
       readonly oldText: string | null
       readonly newText: string
+      /** 1-based file line the text's first line sits on, set only when the
+       *  producer knows the text is a whole-file image (or a known slice).
+       *  Absent means the position is unknown: the unified card renders the
+       *  hunks but prints no file line numbers rather than inventing them
+       *  (#250 P2-3, #1777). */
+      readonly oldStart?: number
+      readonly newStart?: number
     }
   | {
       readonly path: string
@@ -243,12 +275,14 @@ export type ToolFileDiff =
     }
 
 /** Completed-call render intent (structural subset of dsh-tools
- *  ToolResultView). `web` results and unknown shapes fall back to raw text. */
+ *  ToolResultView, plus this app's `files` delivery card). `web` results and
+ *  unknown shapes fall back to raw text. */
 export type ToolResultView = ToolViewMeta & (
   | { readonly card: 'generic'; readonly title?: string; readonly content?: ReadonlyArray<{ readonly type: string; readonly text?: string }> }
   | { readonly card: 'terminal'; readonly title?: string; readonly output?: string; readonly exitCode?: number; readonly signal?: string }
   | { readonly card: 'diff'; readonly title?: string; readonly diffs: readonly ToolFileDiff[] }
   | { readonly card: 'read'; readonly title?: string; readonly path?: string; readonly content?: ReadonlyArray<{ readonly type: string; readonly text?: string }> }
+  | { readonly card: 'files'; readonly files: readonly ToolPresentedFile[] }
   | {
       readonly card: 'search'
       readonly shape: 'matches'
@@ -264,6 +298,10 @@ export interface SubagentRow {
   agentId: string
   runId?: string
   description: string
+  /** Model-facing name from the parent catalog (rc.2 payload v3): the root is
+   *  `lead`, descendant paths look like `reviewer/checker`. Absent for
+   *  historical children recorded before names existed. */
+  name?: string
   /** Durable creation mode from the kernel catalog event; absent before the
    *  parent log's `subagent/catalog` fact arrives (bus-only discovery). */
   mode?: 'one-shot' | 'continuable' | 'unknown'
@@ -299,6 +337,10 @@ export interface SubagentState {
   agentId: string
   runId?: string
   description: string
+  /** Model-facing name from the parent catalog (rc.2 payload v3): the root is
+   *  `lead`, descendant paths look like `reviewer/checker`. Absent for
+   *  historical children recorded before names existed. */
+  name?: string
   /** Durable creation mode from `subagent/catalog` (one-shot burns out;
    *  continuable survives epochs and can take later prompts). */
   mode?: 'one-shot' | 'continuable' | 'unknown'
@@ -1345,6 +1387,9 @@ export interface TeamMember {
   /** Durable lifecycle only; whether a turn is running comes from the
    *  member's own session (the subagent row for a teammate). */
   readonly phase: 'provisioning' | 'active' | 'failed'
+  /** The child's creation label (`subagent/catalog` label), when the backend
+   *  supplies one. The task board and the subagent row own the live text. */
+  readonly description?: string
   readonly error?: string
 }
 
@@ -1367,12 +1412,26 @@ export interface TeamTask {
 /**
  * The Agent Team rooted at the Lead session of the session on screen, as its
  * backend publishes it. Present only when there is a team to show: at least
- * one teammate, a task, or a projection failure — a session's implicit
- * one-member team (just the Lead) reads as none.
+ * one teammate, a task, a saved selection, or a projection failure — a
+ * legacy session's implicit one-member team (just the Lead) reads as none.
  */
 export interface TeamView {
   /** The Lead session id; differs from the bound session inside a teammate. */
   readonly leadSessionId: string
+  /**
+   * How the backend supplies the team. `roster` is the legacy wire that
+   * carries durable members (`0.2.2-rc.1` and earlier); `switch` is the
+   * per-session selection wire (`{enabled, tasks, failure}`), whose members
+   * are the Lead's current subagents, joined by the UI.
+   */
+  readonly mode: 'roster' | 'switch'
+  /**
+   * The root session's saved Team selection. A `roster` backend only mounts
+   * the service while the feature is on, so its view is always enabled; a
+   * `switch` backend can publish a disabled root whose task board remains
+   * readable.
+   */
+  readonly enabled: boolean
   readonly members: readonly TeamMember[]
   readonly tasks: readonly TeamTask[]
   /** The first rejected persisted record; members and tasks are then the
